@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .filenames import build_unique_output_path
+from .media import (
+    FFmpegMediaProcessor,
+    MediaProcessingError,
+    MediaProcessingInterrupted,
+)
 from .store import TaskRecord
 
 
@@ -26,6 +31,30 @@ class CookieProvider(Protocol):
     def refresh(self, url: str) -> Path: ...
 
 
+class MediaProcessor(Protocol):
+    def ensure_compatible(
+        self,
+        source: Path,
+        output: Path,
+        on_progress: ProgressCallback,
+    ) -> Path: ...
+
+
+H264_PREFERRED_FORMAT = "/".join(
+    (
+        "bestvideo[vcodec^=avc1]+bestaudio[acodec=mp4a.40.2]",
+        "bestvideo[vcodec^=h264]+bestaudio[acodec=mp4a.40.2]",
+        "best[vcodec^=avc1][acodec=mp4a.40.2]",
+        "best[vcodec^=h264][acodec=mp4a.40.2]",
+        "bestvideo[vcodec^=avc1]+bestaudio",
+        "bestvideo[vcodec^=h264]+bestaudio",
+        "best[vcodec^=avc1]",
+        "best[vcodec^=h264]",
+        "bestvideo*+bestaudio/best",
+    )
+)
+
+
 class ErrorCode(StrEnum):
     INVALID_URL = "invalid_url"
     UNAVAILABLE = "unavailable"
@@ -36,6 +65,7 @@ class ErrorCode(StrEnum):
     NETWORK = "network"
     DISK_ERROR = "disk_error"
     MERGE_ERROR = "merge_error"
+    TRANSCODE_ERROR = "transcode_error"
     UNKNOWN = "unknown"
 
 
@@ -49,6 +79,7 @@ ERROR_MESSAGES = {
     ErrorCode.NETWORK: "网络连接失败",
     ErrorCode.DISK_ERROR: "下载目录无权限或磁盘空间不足",
     ErrorCode.MERGE_ERROR: "音视频合并失败",
+    ErrorCode.TRANSCODE_ERROR: "兼容格式转换失败",
     ErrorCode.UNKNOWN: "解析或下载失败",
 }
 
@@ -61,7 +92,11 @@ class DownloadError(RuntimeError):
         self.user_message = ERROR_MESSAGES[code]
 
 
-class DownloadCancelled(RuntimeError):
+class DownloadCancelled(MediaProcessingInterrupted):
+    pass
+
+
+class DownloadPaused(MediaProcessingInterrupted):
     pass
 
 
@@ -110,11 +145,15 @@ class YtDlpDownloader:
         ffmpeg_location: Path | None = None,
         cookie_file: Path | None = None,
         cookie_provider: CookieProvider | None = None,
+        media_processor: MediaProcessor | None = None,
     ) -> None:
         self._ydl_factory = ydl_factory
         self._ffmpeg_location = ffmpeg_location
         self._cookie_file = cookie_file
         self._cookie_provider = cookie_provider
+        self._media_processor = media_processor
+        if self._media_processor is None and ffmpeg_location is not None:
+            self._media_processor = FFmpegMediaProcessor(ffmpeg_location)
         self._cookie_lock = threading.Lock()
         self._cookie_generation = 0
         self._cookie_refresh_error: tuple[int, Exception] | None = None
@@ -159,7 +198,7 @@ class YtDlpDownloader:
             "retries": 3,
             "fragment_retries": 3,
             "concurrent_fragment_downloads": 2,
-            "format": "bestvideo*+bestaudio/best",
+            "format": H264_PREFERRED_FORMAT,
             "merge_output_format": "mp4",
             "outtmpl": {"default": output_template},
             "progress_hooks": [progress_hook],
@@ -200,13 +239,33 @@ class YtDlpDownloader:
                 raise DownloadError(ErrorCode.UNKNOWN, "下载器未返回可用的输出文件")
             title = str(info.get("title") or "")
             video_id = str(info.get("id") or task.video_id or task.id)
-            extension = source.suffix.lstrip(".") or str(info.get("ext") or "mp4")
+            if self._media_processor is not None:
+                compatible_output = temp_dir / f"{temp_key}.compat.mp4"
+                try:
+                    processed = self._media_processor.ensure_compatible(
+                        source,
+                        compatible_output,
+                        on_progress,
+                    )
+                except (DownloadCancelled, DownloadPaused, MediaProcessingError):
+                    raise
+                except Exception as exc:
+                    raise MediaProcessingError(str(exc)) from exc
+                if processed != source:
+                    source.unlink(missing_ok=True)
+                source = processed
             on_progress({"status": "merging", "progress": 100.0})
-            destination = build_unique_output_path(task.output_dir, title or f"抖音视频_{video_id}", extension)
+            destination = build_unique_output_path(
+                task.output_dir,
+                title or f"抖音视频_{video_id}",
+                "mp4",
+            )
             shutil.move(str(source), str(destination))
             return DownloadResult(video_id=video_id, title=title, output_path=destination)
-        except DownloadCancelled:
+        except (DownloadCancelled, DownloadPaused):
             raise
+        except MediaProcessingError as exc:
+            raise DownloadError(ErrorCode.TRANSCODE_ERROR, str(exc)) from exc
         except DownloadError:
             raise
         except Exception as exc:

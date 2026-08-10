@@ -6,6 +6,7 @@ import pytest
 from douyin_downloader.downloader import (
     DownloadCancelled,
     DownloadError,
+    DownloadPaused,
     ErrorCode,
     YtDlpDownloader,
     classify_download_error,
@@ -48,6 +49,22 @@ class FakeYoutubeDL:
         }
 
 
+class FakeMediaProcessor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Path, Path]] = []
+
+    def ensure_compatible(
+        self,
+        source: Path,
+        output: Path,
+        on_progress,
+    ) -> Path:
+        self.calls.append((source, output))
+        on_progress({"status": "transcoding", "progress": 50.0})
+        output.write_bytes(b"compatible")
+        return output
+
+
 def make_task(tmp_path: Path) -> TaskRecord:
     return TaskRecord(
         id=1,
@@ -87,6 +104,63 @@ def test_download_reports_progress_and_moves_to_safe_title(tmp_path: Path) -> No
     assert result.title == "测试:标题"
     assert result.output_path == tmp_path / "测试_标题.mp4"
     assert result.output_path.read_bytes() == b"video"
+
+
+def test_download_prefers_h264_aac_but_keeps_best_format_fallback(tmp_path: Path) -> None:
+    captured: dict = {}
+
+    def factory(options: dict):
+        captured.update(options)
+        return FakeYoutubeDL(options)
+
+    YtDlpDownloader(ydl_factory=factory).download(
+        make_task(tmp_path),
+        lambda _event: None,
+    )
+
+    selector = captured["format"]
+    assert selector.index("bestvideo[vcodec^=avc1]") < selector.index("bestvideo*+bestaudio/best")
+    assert selector.index("bestaudio[acodec=mp4a.40.2]") < selector.index("bestvideo*+bestaudio/best")
+
+
+def test_download_uses_compatible_mp4_returned_by_media_processor(tmp_path: Path) -> None:
+    events: list[dict] = []
+    processor = FakeMediaProcessor()
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: FakeYoutubeDL(options),
+        media_processor=processor,
+    )
+
+    result = downloader.download(make_task(tmp_path), events.append)
+
+    assert processor.calls == [
+        (
+            tmp_path / ".douyin-part" / "task-1.mp4",
+            tmp_path / ".douyin-part" / "task-1.compat.mp4",
+        )
+    ]
+    assert {"status": "transcoding", "progress": 50.0} in events
+    assert result.output_path.suffix == ".mp4"
+    assert result.output_path.read_bytes() == b"compatible"
+    assert not (tmp_path / ".douyin-part" / "task-1.mp4").exists()
+
+
+def test_any_media_processing_failure_has_specific_user_facing_error(tmp_path: Path) -> None:
+    class FailingMediaProcessor:
+        def ensure_compatible(self, source: Path, output: Path, on_progress) -> Path:
+            raise OSError("encoder failed")
+
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: FakeYoutubeDL(options),
+        media_processor=FailingMediaProcessor(),
+    )
+
+    with pytest.raises(DownloadError) as caught:
+        downloader.download(make_task(tmp_path), lambda _event: None)
+
+    assert caught.value.code == ErrorCode.TRANSCODE_ERROR
+    assert caught.value.user_message == "兼容格式转换失败"
+    assert not list(tmp_path.glob("*.mp4"))
 
 
 @pytest.mark.parametrize(
@@ -305,6 +379,16 @@ def test_progress_cancellation_is_not_wrapped_as_download_failure(tmp_path: Path
 
     with pytest.raises(DownloadCancelled):
         downloader.download(make_task(tmp_path), cancel)
+
+
+def test_progress_pause_is_not_wrapped_as_download_failure(tmp_path: Path) -> None:
+    downloader = YtDlpDownloader(ydl_factory=lambda options: FakeYoutubeDL(options))
+
+    def pause(_event: dict) -> None:
+        raise DownloadPaused()
+
+    with pytest.raises(DownloadPaused):
+        downloader.download(make_task(tmp_path), pause)
 
 
 def test_temporary_download_name_is_scoped_to_task_id(tmp_path: Path) -> None:

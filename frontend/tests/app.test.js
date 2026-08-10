@@ -13,7 +13,7 @@ const historyPayload = {
       total: 2,
       output_dir: "D:\\Videos",
       created_at: "2026-08-10T08:00:00+00:00",
-      counts: { completed: 1, failed: 1 },
+      counts: { completed: 1, transcoding: 1 },
     },
   ],
   page: 1,
@@ -27,9 +27,10 @@ const batchPayload = {
   total: 2,
   output_dir: "D:\\Videos",
   created_at: "2026-08-10T08:00:00+00:00",
-  counts: { completed: 1, failed: 1 },
+  counts: { completed: 1, transcoding: 1 },
   tasks: [],
   pause_reason: null,
+  paused: false,
 };
 
 class FakeEventSource {
@@ -76,6 +77,12 @@ beforeEach(() => {
     if (url === "/api/batches/5") {
       return jsonResponse(batchPayload);
     }
+    if (url === "/api/batches/5/pause") {
+      return jsonResponse({ ...batchPayload, paused: true });
+    }
+    if (url === "/api/batches/5/resume") {
+      return jsonResponse({ ...batchPayload, paused: false });
+    }
     throw new Error(`未处理的测试请求: ${url}`);
   }));
   vi.stubGlobal("scrollTo", vi.fn());
@@ -97,6 +104,14 @@ describe("历史批次抽屉", () => {
     expect(wrapper.get(".history-drawer").attributes("aria-modal")).toBe("true");
     expect(wrapper.get(".history-drawer").text()).toContain("批次 #5");
     expect(document.body.classList.contains("history-drawer-open")).toBe(true);
+    wrapper.unmount();
+  });
+
+  test("历史批次处理中数量包含兼容转换任务", async () => {
+    const wrapper = await mountApp();
+    await wrapper.get(".history-trigger").trigger("click");
+
+    expect(wrapper.get(".history-counts").text()).toContain("处理中 1");
     wrapper.unmount();
   });
 
@@ -123,6 +138,97 @@ describe("历史批次抽屉", () => {
     expect(wrapper.get(".task-panel").text()).toContain("批次 #5");
     wrapper.unmount();
   });
+
+  test("取消确认时不删除全部批次", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => false));
+    const wrapper = await mountApp();
+    await wrapper.get(".history-trigger").trigger("click");
+
+    await wrapper.get(".delete-all-batches-button").trigger("click");
+
+    expect(confirm).toHaveBeenCalledWith(
+      "确定删除全部 1 个批次吗？未完成下载将取消并清理分片；已完成视频文件和保存目录会保留。此操作无法撤销。",
+    );
+    expect(fetch).not.toHaveBeenCalledWith(
+      "/api/batches",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    wrapper.unmount();
+  });
+
+  test("确认后一次删除全部批次并清空当前详情", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const wrapper = await mountApp();
+    await wrapper.get(".history-trigger").trigger("click");
+    await wrapper.get(".history-actions .secondary-button").trigger("click");
+    await flushPromises();
+    const batchEvents = FakeEventSource.instances.find(
+      (item) => item.url === "/api/events?batchId=5",
+    );
+    await wrapper.get(".history-trigger").trigger("click");
+    fetch.mockImplementation(async (url, options = {}) => {
+      if (url === "/api/batches" && options.method === "DELETE") {
+        return jsonResponse({ deleted: true, count: 1 });
+      }
+      if (url === "/api/batches?page=1&page_size=20") {
+        return jsonResponse({
+          items: [],
+          page: 1,
+          page_size: 20,
+          total: 0,
+          total_pages: 0,
+        });
+      }
+      throw new Error(`未处理的测试请求: ${url}`);
+    });
+
+    await wrapper.get(".delete-all-batches-button").trigger("click");
+    await flushPromises();
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/batches",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(batchEvents.closed).toBe(true);
+    expect(wrapper.find(".task-panel").exists()).toBe(false);
+    expect(wrapper.get(".history-empty").text()).toBe("暂无批次记录");
+    expect(wrapper.text()).toContain("已删除 1 个批次，已完成视频文件仍保留在磁盘中");
+    wrapper.unmount();
+  });
+
+  test("删除全部批次期间禁用按钮并显示忙碌状态", async () => {
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const wrapper = await mountApp();
+    await wrapper.get(".history-trigger").trigger("click");
+    let resolveDelete;
+    fetch.mockImplementation((url, options = {}) => {
+      if (url === "/api/batches" && options.method === "DELETE") {
+        return new Promise((resolve) => {
+          resolveDelete = resolve;
+        });
+      }
+      if (url === "/api/batches?page=1&page_size=20") {
+        return Promise.resolve(jsonResponse({
+          items: [],
+          page: 1,
+          page_size: 20,
+          total: 0,
+          total_pages: 0,
+        }));
+      }
+      throw new Error(`未处理的测试请求: ${url}`);
+    });
+
+    await wrapper.get(".delete-all-batches-button").trigger("click");
+
+    const button = wrapper.get(".delete-all-batches-button");
+    expect(button.attributes("disabled")).toBeDefined();
+    expect(button.text()).toBe("正在删除…");
+
+    resolveDelete(jsonResponse({ deleted: true, count: 1 }));
+    await flushPromises();
+    wrapper.unmount();
+  });
 });
 
 test("页面挂载时建立生命周期连接并在卸载时关闭", async () => {
@@ -135,4 +241,33 @@ test("页面挂载时建立生命周期连接并在卸载时关闭", async () =>
   wrapper.unmount();
 
   expect(session.closed).toBe(true);
+});
+
+test("当前批次可暂停并继续下载", async () => {
+  const wrapper = await mountApp();
+  await wrapper.get(".history-trigger").trigger("click");
+  await wrapper.get(".history-actions .secondary-button").trigger("click");
+  await flushPromises();
+
+  const pauseButton = wrapper.get(".pause-button");
+  expect(pauseButton.text()).toBe("暂停下载");
+
+  await pauseButton.trigger("click");
+  await flushPromises();
+  expect(wrapper.get(".pause-button").text()).toBe("继续下载");
+  expect(wrapper.get(".batch-paused-alert").text()).toContain("已暂停");
+
+  await wrapper.get(".pause-button").trigger("click");
+  await flushPromises();
+  expect(wrapper.get(".pause-button").text()).toBe("暂停下载");
+});
+
+test("当前批次处理中数量包含兼容转换任务", async () => {
+  const wrapper = await mountApp();
+  await wrapper.get(".history-trigger").trigger("click");
+  await wrapper.get(".history-actions .secondary-button").trigger("click");
+  await flushPromises();
+
+  expect(wrapper.get(".metrics").text()).toContain("处理中1");
+  wrapper.unmount();
 });

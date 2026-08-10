@@ -18,6 +18,7 @@ describe("任务显示格式", () => {
   it("显示中文任务状态", () => {
     expect(statusLabel("queued")).toBe("等待解析");
     expect(statusLabel("downloading")).toBe("下载中");
+    expect(statusLabel("transcoding")).toBe("兼容转换中");
     expect(statusLabel("completed")).toBe("已完成");
     expect(statusLabel("failed")).toBe("失败");
   });

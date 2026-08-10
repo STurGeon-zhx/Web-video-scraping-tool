@@ -3,6 +3,7 @@ const STATUS_LABELS = {
   resolving: "解析中",
   downloading: "下载中",
   merging: "合并中",
+  transcoding: "兼容转换中",
   completed: "已完成",
   failed: "失败",
   skipped: "已跳过",
@@ -40,4 +41,3 @@ export function formatEta(value) {
 export function statusLabel(status) {
   return STATUS_LABELS[status] || status || "未知";
 }
-

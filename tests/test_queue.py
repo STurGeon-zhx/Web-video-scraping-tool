@@ -2,7 +2,13 @@ import threading
 import time
 from pathlib import Path
 
-from douyin_downloader.downloader import DownloadCancelled, DownloadError, DownloadResult, ErrorCode
+from douyin_downloader.downloader import (
+    DownloadCancelled,
+    DownloadError,
+    DownloadPaused,
+    DownloadResult,
+    ErrorCode,
+)
 from douyin_downloader.queue import TaskQueue
 from douyin_downloader.store import Database
 
@@ -126,6 +132,69 @@ def test_cancel_active_batch_removes_only_its_partial_files(tmp_path: Path) -> N
     assert completed_file.read_bytes() == b"completed"
 
 
+def test_transcoding_progress_is_persisted_and_cancellation_cleans_output(tmp_path: Path) -> None:
+    database, batch_id = make_database(tmp_path, 1)
+    transcoding = threading.Event()
+    stopped = threading.Event()
+
+    class TranscodingDownloader:
+        def download(self, task, on_progress):
+            partial = task.output_dir / ".douyin-part" / f"task-{task.id}.compat.mp4"
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"partial")
+            try:
+                while True:
+                    on_progress({"status": "transcoding", "progress": 42.0})
+                    transcoding.set()
+                    time.sleep(0.01)
+            except DownloadCancelled:
+                stopped.set()
+                raise
+
+    queue = TaskQueue(database, TranscodingDownloader(), worker_count=1)
+    queue.start()
+    try:
+        assert transcoding.wait(timeout=2)
+        wait_until(
+            lambda: database.get_batch(batch_id)["counts"].get("transcoding") == 1
+        )
+        queue.cancel_batch(batch_id)
+        assert stopped.wait(timeout=2)
+    finally:
+        queue.stop()
+
+    assert not (tmp_path / ".douyin-part" / "task-1.compat.mp4").exists()
+
+
+def test_queue_stop_interrupts_transcoding_and_cleans_task_partials(tmp_path: Path) -> None:
+    database, _batch_id = make_database(tmp_path, 1)
+    transcoding = threading.Event()
+    stopped = threading.Event()
+    partial = tmp_path / ".douyin-part" / "task-1.compat.mp4"
+
+    class TranscodingDownloader:
+        def download(self, task, on_progress):
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"partial")
+            try:
+                while True:
+                    on_progress({"status": "transcoding", "progress": 10.0})
+                    transcoding.set()
+                    time.sleep(0.01)
+            except DownloadCancelled:
+                stopped.set()
+                raise
+
+    queue = TaskQueue(database, TranscodingDownloader(), worker_count=1)
+    queue.start()
+    assert transcoding.wait(timeout=2)
+
+    queue.stop()
+
+    assert stopped.wait(timeout=1)
+    assert not partial.exists()
+
+
 def test_cancel_batch_cleans_unclaimed_task_partials(tmp_path: Path) -> None:
     database, batch_id = make_database(tmp_path, 1)
     partial_dir = tmp_path / ".douyin-part"
@@ -195,6 +264,99 @@ def test_cancel_batch_interrupts_retry_backoff(tmp_path: Path) -> None:
         )
     finally:
         queue.stop()
+
+
+def test_pause_active_batch_preserves_partial_and_other_batches_continue(tmp_path: Path) -> None:
+    database, first_batch = make_database(tmp_path, 1)
+    second_batch = database.create_batch(
+        ["https://www.douyin.com/video/2234567890123456789"], tmp_path
+    )
+    first_started = threading.Event()
+    first_paused = threading.Event()
+
+    class PausableDownloader:
+        def __init__(self) -> None:
+            self.first_calls = 0
+
+        def download(self, task, on_progress):
+            partial_dir = task.output_dir / ".douyin-part"
+            partial_dir.mkdir(parents=True, exist_ok=True)
+            partial = partial_dir / f"task-{task.id}.mp4.part"
+            if task.batch_id == first_batch:
+                self.first_calls += 1
+                if self.first_calls == 1:
+                    partial.write_bytes(b"partial")
+                    first_started.set()
+                    try:
+                        while True:
+                            on_progress({"status": "downloading", "progress": 25.0})
+                            time.sleep(0.01)
+                    except DownloadPaused:
+                        first_paused.set()
+                        raise
+                assert partial.read_bytes() == b"partial"
+            output = tmp_path / f"{task.id}.mp4"
+            output.write_bytes(b"video")
+            return DownloadResult(task.video_id or "unknown", "completed", output)
+
+    downloader = PausableDownloader()
+    queue = TaskQueue(database, downloader, worker_count=1)
+    queue.start()
+    try:
+        assert first_started.wait(timeout=2)
+        queue.pause_batch(first_batch)
+        assert first_paused.wait(timeout=2)
+        wait_until(
+            lambda: database.get_batch(second_batch)["counts"].get("completed") == 1
+        )
+
+        paused = database.get_batch(first_batch)
+        assert paused["paused"] is True
+        assert paused["counts"] == {"queued": 1}
+        assert (tmp_path / ".douyin-part" / "task-1.mp4.part").read_bytes() == b"partial"
+        assert downloader.first_calls == 1
+
+        queue.resume_batch(first_batch)
+        wait_until(
+            lambda: database.get_batch(first_batch)["counts"].get("completed") == 1
+        )
+    finally:
+        queue.stop()
+
+    assert database.get_batch(first_batch)["paused"] is False
+    assert downloader.first_calls == 2
+
+
+def test_pause_interrupts_retry_backoff_without_deleting_partial(tmp_path: Path) -> None:
+    database, batch_id = make_database(tmp_path, 1)
+    failed = threading.Event()
+    partial = tmp_path / ".douyin-part" / "task-1.mp4.part"
+
+    class RetryDownloader:
+        calls = 0
+
+        def download(self, task, on_progress):
+            self.calls += 1
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"partial")
+            failed.set()
+            raise DownloadError(ErrorCode.NETWORK, "Connection timed out")
+
+    downloader = RetryDownloader()
+    queue = TaskQueue(database, downloader, worker_count=1, retry_delays=(5.0, 5.0))
+    queue.start()
+    try:
+        assert failed.wait(timeout=2)
+        queue.pause_batch(batch_id)
+        wait_until(
+            lambda: database.get_batch(batch_id)["counts"] == {"queued": 1},
+            timeout=1,
+        )
+    finally:
+        queue.stop()
+
+    assert downloader.calls == 1
+    assert partial.read_bytes() == b"partial"
 
 
 def test_permanent_login_failure_is_not_retried(tmp_path: Path) -> None:

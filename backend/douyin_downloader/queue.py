@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from .downloader import (
     DownloadCancelled,
     DownloadError,
+    DownloadPaused,
     DownloadResult,
     ErrorCode,
     ERROR_MESSAGES,
@@ -46,6 +47,7 @@ class TaskQueue:
         self._threads: list[threading.Thread] = []
         self._cancel_lock = threading.Lock()
         self._cancelled_batches: set[int] = set()
+        self._paused_batches: set[int] = set()
         self.pause_reason: str | None = None
 
     def start(self) -> None:
@@ -74,6 +76,7 @@ class TaskQueue:
     def cancel_batch(self, batch_id: int) -> None:
         with self._cancel_lock:
             self._cancelled_batches.add(batch_id)
+            self._paused_batches.discard(batch_id)
         try:
             batch = self.database.get_batch(batch_id)
         except KeyError:
@@ -89,9 +92,25 @@ class TaskQueue:
                 self._schedule_cleanup_retry(pending)
         self._wake_event.set()
 
+    def pause_batch(self, batch_id: int) -> None:
+        self.database.set_batch_paused(batch_id, True)
+        with self._cancel_lock:
+            self._paused_batches.add(batch_id)
+        self._wake_event.set()
+
+    def resume_batch(self, batch_id: int) -> None:
+        self.database.set_batch_paused(batch_id, False)
+        with self._cancel_lock:
+            self._paused_batches.discard(batch_id)
+        self._wake_event.set()
+
     def _is_cancelled(self, batch_id: int) -> bool:
         with self._cancel_lock:
             return batch_id in self._cancelled_batches
+
+    def _is_paused(self, batch_id: int) -> bool:
+        with self._cancel_lock:
+            return batch_id in self._paused_batches
 
     def _worker_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -102,6 +121,9 @@ class TaskQueue:
                 continue
             if self._is_cancelled(task.batch_id):
                 self._cleanup_partial_files(task)
+                continue
+            if self._is_paused(task.batch_id):
+                self.database.update_task(task.id, status=TaskStatus.QUEUED)
                 continue
             if not self._has_disk_space(task.output_dir):
                 self.pause_reason = "磁盘剩余空间不足 1 GB，队列已暂停"
@@ -126,6 +148,9 @@ class TaskQueue:
             if self._is_cancelled(task.batch_id):
                 self._cleanup_partial_files(task)
                 return
+            if self._is_paused(task.batch_id):
+                self.database.update_task(task.id, status=TaskStatus.QUEUED)
+                return
             if self._stop_event.is_set():
                 self.database.update_task(task.id, status=TaskStatus.QUEUED)
                 return
@@ -144,6 +169,16 @@ class TaskQueue:
             except DownloadCancelled:
                 self._cleanup_partial_files(task)
                 return
+            except DownloadPaused:
+                self.database.update_task(
+                    task.id,
+                    status=TaskStatus.QUEUED,
+                    speed=None,
+                    eta=None,
+                    error_code=None,
+                    error_message=None,
+                )
+                return
             except DownloadError as exc:
                 if exc.code in RETRYABLE_ERRORS and attempt < attempts:
                     self.database.update_task(
@@ -152,7 +187,17 @@ class TaskQueue:
                         error_message=exc.user_message,
                     )
                     if self._wait_for_retry(task, self.retry_delays[attempt - 1]):
-                        self._cleanup_partial_files(task)
+                        if self._is_paused(task.batch_id):
+                            self.database.update_task(
+                                task.id,
+                                status=TaskStatus.QUEUED,
+                                speed=None,
+                                eta=None,
+                                error_code=None,
+                                error_message=None,
+                            )
+                        else:
+                            self._cleanup_partial_files(task)
                         return
                     continue
                 self.database.update_task(
@@ -189,7 +234,11 @@ class TaskQueue:
     def _wait_for_retry(self, task: TaskRecord, delay: float) -> bool:
         deadline = time.monotonic() + delay
         while True:
-            if self._stop_event.is_set() or self._is_cancelled(task.batch_id):
+            if (
+                self._stop_event.is_set()
+                or self._is_cancelled(task.batch_id)
+                or self._is_paused(task.batch_id)
+            ):
                 return True
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -199,12 +248,18 @@ class TaskQueue:
     def _on_progress(self, task: TaskRecord, event: dict[str, Any]) -> None:
         if self._is_cancelled(task.batch_id):
             raise DownloadCancelled()
+        if self._stop_event.is_set():
+            raise DownloadCancelled()
+        if self._is_paused(task.batch_id):
+            raise DownloadPaused()
         fields = {key: value for key, value in event.items() if key != "status"}
         status = event.get("status")
         if status == "downloading":
             fields["status"] = TaskStatus.DOWNLOADING
         elif status == "merging":
             fields["status"] = TaskStatus.MERGING
+        elif status == "transcoding":
+            fields["status"] = TaskStatus.TRANSCODING
         self.database.update_task(task.id, **fields)
 
     def _cleanup_partial_files(self, task: TaskRecord) -> None:

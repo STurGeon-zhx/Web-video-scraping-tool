@@ -11,10 +11,12 @@ const downloadDirectory = ref("");
 const preview = ref(null);
 const batch = ref(null);
 const busy = ref(false);
+const pauseBusy = ref(false);
 const notice = ref("");
 const error = ref("");
 const history = ref({ items: [], page: 1, page_size: 20, total: 0, total_pages: 0 });
 const historyBusy = ref(false);
+const deleteAllBusy = ref(false);
 const historyOpen = ref(false);
 let eventSource = null;
 let pageSession = null;
@@ -197,6 +199,28 @@ async function deleteBatch(batchId) {
   }
 }
 
+async function deleteAllBatches() {
+  if (deleteAllBusy.value || history.value.total === 0) return;
+  const confirmed = window.confirm(
+    `确定删除全部 ${history.value.total} 个批次吗？未完成下载将取消并清理分片；已完成视频文件和保存目录会保留。此操作无法撤销。`,
+  );
+  if (!confirmed) return;
+  deleteAllBusy.value = true;
+  error.value = "";
+  notice.value = "";
+  try {
+    const result = await request("/api/batches", { method: "DELETE" });
+    closeCurrentEvents();
+    batch.value = null;
+    await loadHistory(1);
+    notice.value = `已删除 ${result.count} 个批次，已完成视频文件仍保留在磁盘中`;
+  } catch (reason) {
+    error.value = reason.message;
+  } finally {
+    deleteAllBusy.value = false;
+  }
+}
+
 function formatCreatedAt(value) {
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
 }
@@ -205,6 +229,21 @@ async function retryFailed() {
   if (!batch.value) return;
   const result = await request(`/api/batches/${batch.value.id}/retry-failed`, { method: "POST" });
   notice.value = result.retried ? `已重新加入 ${result.retried} 条失败任务` : "没有可重试的失败任务";
+}
+
+async function toggleBatchPause() {
+  if (!batch.value || pauseBusy.value) return;
+  pauseBusy.value = true;
+  error.value = "";
+  try {
+    const action = batch.value.paused ? "resume" : "pause";
+    batch.value = await request(`/api/batches/${batch.value.id}/${action}`, { method: "POST" });
+    notice.value = batch.value.paused ? "当前批次已暂停" : "当前批次已继续下载";
+  } catch (reason) {
+    error.value = reason.message;
+  } finally {
+    pauseBusy.value = false;
+  }
 }
 
 async function openDirectory() {
@@ -308,6 +347,9 @@ onBeforeUnmount(() => {
             <h3>下载进度</h3>
           </div>
           <div class="task-actions">
+            <button class="secondary-button pause-button" type="button" :disabled="pauseBusy" @click="toggleBatchPause">
+              {{ batch.paused ? "继续下载" : "暂停下载" }}
+            </button>
             <button class="secondary-button" type="button" @click="retryFailed">重试失败项</button>
             <button class="secondary-button" type="button" @click="openDirectory">打开下载目录</button>
           </div>
@@ -316,7 +358,7 @@ onBeforeUnmount(() => {
         <div class="metrics">
           <div><span>总任务</span><strong>{{ batch.total }}</strong></div>
           <div><span>等待</span><strong>{{ counts.queued || 0 }}</strong></div>
-          <div><span>处理中</span><strong>{{ (counts.resolving || 0) + (counts.downloading || 0) + (counts.merging || 0) }}</strong></div>
+          <div><span>处理中</span><strong>{{ (counts.resolving || 0) + (counts.downloading || 0) + (counts.merging || 0) + (counts.transcoding || 0) }}</strong></div>
           <div class="success"><span>完成</span><strong>{{ counts.completed || 0 }}</strong></div>
           <div class="failure"><span>失败</span><strong>{{ counts.failed || 0 }}</strong></div>
         </div>
@@ -325,6 +367,7 @@ onBeforeUnmount(() => {
           <div><span>整体进度</span><strong>{{ overallProgress }}%</strong></div>
           <div class="progress-track"><i :style="{ width: `${overallProgress}%` }"></i></div>
         </div>
+        <div v-if="batch.paused" class="alert notice-alert batch-paused-alert">当前批次已暂停，点击“继续下载”恢复</div>
         <div v-if="batch.pause_reason" class="alert error-alert">{{ batch.pause_reason }}</div>
 
         <div class="table-wrap">
@@ -365,7 +408,15 @@ onBeforeUnmount(() => {
             <button class="history-drawer-close" type="button" aria-label="关闭批次历史" @click="closeHistory">×</button>
           </div>
         </div>
-        <p class="history-total">共 {{ history.total }} 个批次</p>
+        <div class="history-toolbar">
+          <p class="history-total">共 {{ history.total }} 个批次</p>
+          <button
+            class="delete-all-batches-button"
+            type="button"
+            :disabled="deleteAllBusy || historyBusy || history.total === 0"
+            @click="deleteAllBatches"
+          >{{ deleteAllBusy ? "正在删除…" : "一键删除所有批次" }}</button>
+        </div>
         <div v-if="historyBusy" class="history-empty">正在加载批次历史…</div>
         <div v-else-if="!history.items.length" class="history-empty">暂无批次记录</div>
         <div v-else class="history-list">
@@ -377,7 +428,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="history-counts">
               <span>等待 {{ item.counts.queued || 0 }}</span>
-              <span>处理中 {{ (item.counts.resolving || 0) + (item.counts.downloading || 0) + (item.counts.merging || 0) }}</span>
+              <span>处理中 {{ (item.counts.resolving || 0) + (item.counts.downloading || 0) + (item.counts.merging || 0) + (item.counts.transcoding || 0) }}</span>
               <span class="success-text">完成 {{ (item.counts.completed || 0) + (item.counts.skipped || 0) }}</span>
               <span class="failure-text">失败 {{ item.counts.failed || 0 }}</span>
             </div>

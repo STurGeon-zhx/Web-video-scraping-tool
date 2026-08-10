@@ -31,6 +31,10 @@ class QueueController(Protocol):
 
     def cancel_batch(self, batch_id: int) -> None: ...
 
+    def pause_batch(self, batch_id: int) -> None: ...
+
+    def resume_batch(self, batch_id: int) -> None: ...
+
 
 class PreviewRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500_000)
@@ -168,6 +172,14 @@ def create_app(
     ) -> dict:
         return database.list_batches(page=page, page_size=page_size)
 
+    @app.delete("/api/batches")
+    async def delete_all_batches() -> dict:
+        batch_ids = database.list_batch_ids()
+        for batch_id in batch_ids:
+            queue.cancel_batch(batch_id)
+        deleted = sum(database.delete_batch(batch_id) for batch_id in batch_ids)
+        return {"deleted": True, "count": deleted}
+
     @app.get("/api/batches/{batch_id}")
     async def get_batch(batch_id: int) -> dict:
         batch = _batch_or_404(database, batch_id)
@@ -198,6 +210,22 @@ def create_app(
         if retried:
             queue.wake()
         return {"retried": retried}
+
+    @app.post("/api/batches/{batch_id}/pause")
+    async def pause_batch(batch_id: int) -> dict:
+        _batch_or_404(database, batch_id)
+        queue.pause_batch(batch_id)
+        batch = database.get_batch(batch_id)
+        batch["pause_reason"] = queue.pause_reason
+        return batch
+
+    @app.post("/api/batches/{batch_id}/resume")
+    async def resume_batch(batch_id: int) -> dict:
+        _batch_or_404(database, batch_id)
+        queue.resume_batch(batch_id)
+        batch = database.get_batch(batch_id)
+        batch["pause_reason"] = queue.pause_reason
+        return batch
 
     @app.get("/api/settings")
     async def get_settings() -> dict:

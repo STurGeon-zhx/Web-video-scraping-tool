@@ -18,6 +18,7 @@ class TaskStatus(StrEnum):
     RESOLVING = "resolving"
     DOWNLOADING = "downloading"
     MERGING = "merging"
+    TRANSCODING = "transcoding"
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -27,6 +28,7 @@ ACTIVE_STATUSES = (
     TaskStatus.RESOLVING,
     TaskStatus.DOWNLOADING,
     TaskStatus.MERGING,
+    TaskStatus.TRANSCODING,
 )
 
 
@@ -81,6 +83,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS batches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     output_dir TEXT NOT NULL,
+                    paused INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 );
 
@@ -115,6 +118,14 @@ class Database:
                 );
                 """
             )
+            batch_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(batches)")
+            }
+            if "paused" not in batch_columns:
+                connection.execute(
+                    "ALTER TABLE batches ADD COLUMN paused INTEGER NOT NULL DEFAULT 0"
+                )
 
     @staticmethod
     def _now() -> str:
@@ -156,7 +167,8 @@ class Database:
     def get_batch(self, batch_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             batch = connection.execute(
-                "SELECT id, output_dir, created_at FROM batches WHERE id = ?", (batch_id,)
+                "SELECT id, output_dir, paused, created_at FROM batches WHERE id = ?",
+                (batch_id,),
             ).fetchone()
             if batch is None:
                 raise KeyError(batch_id)
@@ -170,6 +182,7 @@ class Database:
         return {
             "id": int(batch["id"]),
             "output_dir": batch["output_dir"],
+            "paused": bool(batch["paused"]),
             "created_at": batch["created_at"],
             "total": len(tasks),
             "counts": counts,
@@ -182,7 +195,7 @@ class Database:
             total = int(connection.execute("SELECT COUNT(*) FROM batches").fetchone()[0])
             batches = connection.execute(
                 """
-                SELECT id, output_dir, created_at FROM batches
+                SELECT id, output_dir, paused, created_at FROM batches
                 ORDER BY id DESC LIMIT ? OFFSET ?
                 """,
                 (page_size, offset),
@@ -201,6 +214,7 @@ class Database:
                     {
                         "id": int(batch["id"]),
                         "output_dir": str(batch["output_dir"]),
+                        "paused": bool(batch["paused"]),
                         "created_at": str(batch["created_at"]),
                         "total": sum(counts.values()),
                         "counts": counts,
@@ -214,10 +228,26 @@ class Database:
             "total_pages": (total + page_size - 1) // page_size,
         }
 
+    def list_batch_ids(self) -> list[int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM batches ORDER BY id DESC"
+            ).fetchall()
+        return [int(row["id"]) for row in rows]
+
     def delete_batch(self, batch_id: int) -> bool:
         with self._lock, self._connect() as connection:
             cursor = connection.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
             return cursor.rowcount == 1
+
+    def set_batch_paused(self, batch_id: int, paused: bool) -> None:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE batches SET paused = ? WHERE id = ?",
+                (int(paused), batch_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(batch_id)
 
     def claim_next_task(self) -> TaskRecord | None:
         with self._lock, self._connect() as connection:
@@ -226,7 +256,8 @@ class Database:
                 """
                 SELECT tasks.*, batches.output_dir
                 FROM tasks JOIN batches ON batches.id = tasks.batch_id
-                WHERE tasks.status = ? ORDER BY tasks.id LIMIT 1
+                WHERE tasks.status = ? AND batches.paused = 0
+                ORDER BY tasks.id LIMIT 1
                 """,
                 (TaskStatus.QUEUED.value,),
             ).fetchone()

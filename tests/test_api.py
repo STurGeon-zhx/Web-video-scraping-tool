@@ -11,9 +11,12 @@ from douyin_downloader.store import Database, TaskStatus
 class IdleQueue:
     pause_reason = None
 
-    def __init__(self) -> None:
+    def __init__(self, database: Database | None = None) -> None:
+        self.database = database
         self.wake_calls = 0
         self.cancel_calls: list[int] = []
+        self.pause_calls: list[int] = []
+        self.resume_calls: list[int] = []
 
     def start(self) -> None:
         return None
@@ -27,11 +30,21 @@ class IdleQueue:
     def cancel_batch(self, batch_id: int) -> None:
         self.cancel_calls.append(batch_id)
 
+    def pause_batch(self, batch_id: int) -> None:
+        self.pause_calls.append(batch_id)
+        if self.database is not None:
+            self.database.set_batch_paused(batch_id, True)
+
+    def resume_batch(self, batch_id: int) -> None:
+        self.resume_calls.append(batch_id)
+        if self.database is not None:
+            self.database.set_batch_paused(batch_id, False)
+
 
 def make_client(tmp_path: Path) -> tuple[TestClient, Database, IdleQueue]:
     database = Database(tmp_path / "api.db")
     database.initialize()
-    queue = IdleQueue()
+    queue = IdleQueue(database)
     app = create_app(
         database,
         queue,
@@ -166,6 +179,23 @@ def test_retry_failed_requeues_only_failed_tasks(tmp_path: Path) -> None:
     assert queue.wake_calls == 1
 
 
+def test_pause_and_resume_batch_return_updated_state(tmp_path: Path) -> None:
+    client, database, queue = make_client(tmp_path)
+    batch_id = database.create_batch(
+        ["https://www.douyin.com/video/1234567890123456789"], tmp_path
+    )
+
+    paused = client.post(f"/api/batches/{batch_id}/pause")
+    resumed = client.post(f"/api/batches/{batch_id}/resume")
+
+    assert paused.status_code == 200
+    assert paused.json()["paused"] is True
+    assert resumed.status_code == 200
+    assert resumed.json()["paused"] is False
+    assert queue.pause_calls == [batch_id]
+    assert queue.resume_calls == [batch_id]
+
+
 def test_list_batches_returns_paginated_summaries(tmp_path: Path) -> None:
     client, database, _ = make_client(tmp_path)
     batch_ids = [
@@ -200,6 +230,34 @@ def test_delete_batch_cancels_queue_before_removing_records(tmp_path: Path) -> N
     assert queue.cancel_calls == [batch_id]
     with pytest.raises(KeyError):
         database.get_batch(batch_id)
+
+
+def test_delete_all_batches_cancels_snapshot_before_removing_records(tmp_path: Path) -> None:
+    client, database, queue = make_client(tmp_path)
+    batch_ids = [
+        database.create_batch(
+            [f"https://www.douyin.com/video/{1234567890123456789 + index}"],
+            tmp_path,
+        )
+        for index in range(2)
+    ]
+
+    response = client.delete("/api/batches")
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True, "count": 2}
+    assert queue.cancel_calls == list(reversed(batch_ids))
+    assert database.list_batches(page=1, page_size=20)["total"] == 0
+
+
+def test_delete_all_batches_is_successful_when_history_is_empty(tmp_path: Path) -> None:
+    client, _, queue = make_client(tmp_path)
+
+    response = client.delete("/api/batches")
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True, "count": 0}
+    assert queue.cancel_calls == []
 
 
 def test_delete_unknown_batch_returns_404(tmp_path: Path) -> None:

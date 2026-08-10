@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -37,6 +38,45 @@ def test_claim_next_task_is_atomic_and_marks_it_resolving(tmp_path: Path) -> Non
     assert database.claim_next_task() is None
 
 
+def test_paused_batch_is_not_claimed_until_resumed(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    batch_id = database.create_batch(
+        ["https://www.douyin.com/video/1234567890123456789"], tmp_path
+    )
+
+    database.set_batch_paused(batch_id, True)
+
+    assert database.get_batch(batch_id)["paused"] is True
+    assert database.claim_next_task() is None
+
+    database.set_batch_paused(batch_id, False)
+
+    assert database.get_batch(batch_id)["paused"] is False
+    assert database.claim_next_task() is not None
+
+
+def test_initialize_adds_pause_state_to_existing_database(tmp_path: Path) -> None:
+    path = tmp_path / "existing.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                output_dir TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    database = Database(path)
+    database.initialize()
+    batch_id = database.create_batch(
+        ["https://www.douyin.com/video/1234567890123456789"], tmp_path
+    )
+
+    assert database.get_batch(batch_id)["paused"] is False
+
+
 def test_recovers_interrupted_tasks_to_queue_on_startup(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     database.create_batch(
@@ -58,6 +98,23 @@ def test_recovers_interrupted_tasks_to_queue_on_startup(tmp_path: Path) -> None:
     assert recovered == 2
     assert [task["status"] for task in tasks] == ["queued", "queued"]
     assert [task["progress"] for task in tasks] == [0.0, 0.0]
+
+
+def test_recovers_interrupted_transcoding_task_to_queue_on_startup(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    batch_id = database.create_batch(
+        ["https://www.douyin.com/video/1234567890123456789"],
+        tmp_path,
+    )
+    task = database.claim_next_task()
+    assert task
+    database.update_task(task.id, status=TaskStatus.TRANSCODING, progress=47.0)
+
+    assert database.recover_interrupted() == 1
+
+    recovered = database.get_batch(batch_id)["tasks"][0]
+    assert recovered["status"] == "queued"
+    assert recovered["progress"] == 0.0
 
 
 def test_retry_failed_only_requeues_failed_tasks(tmp_path: Path) -> None:
@@ -102,6 +159,19 @@ def test_lists_batches_newest_first_with_pagination(tmp_path: Path) -> None:
     assert first_page["total_pages"] == 2
     assert first_page["items"][0]["counts"] == {"queued": 1}
     assert [item["id"] for item in second_page["items"]] == [batch_ids[0]]
+
+
+def test_lists_all_batch_ids_newest_first(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    batch_ids = [
+        database.create_batch(
+            [f"https://www.douyin.com/video/{1234567890123456789 + index}"],
+            tmp_path,
+        )
+        for index in range(3)
+    ]
+
+    assert database.list_batch_ids() == list(reversed(batch_ids))
 
 
 def test_delete_batch_cascades_tasks_without_deleting_output_file(tmp_path: Path) -> None:
