@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "douyin-batch-downloader"
+version = "0.1.0"
+description = "仅在本机运行的抖音公开视频在线播放与批量下载工具"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "pydantic>=2.10,<3",
+  "platformdirs>=4.3,<5",
+]
+
+[project.optional-dependencies]
+download = [
+  "yt-dlp>=2026.3.17",
+  "playwright>=1.52,<2",
+  "imageio-ffmpeg>=0.6,<1",
+]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+]
+build = [
+  "pyinstaller>=6.12,<7",
+]
+
+[project.scripts]
+douyin-batch-downloader = "douyin_downloader.launcher:main"
+
+[tool.setuptools]
+package-dir = {"" = "backend"}
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
