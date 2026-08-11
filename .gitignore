@@ -11,6 +11,7 @@ frontend/dist/
 /build*/
 /dist*/
 /release/
+/视频批量下载工具.exe
 *.spec.bak
 
 .idea/
