@@ -14,15 +14,25 @@
 - 标题文件名自动清理 Windows 非法字符，同名文件绝不覆盖
 - 不读取现有浏览器 Cookie；必要时仅创建无账号的临时 Edge 会话
 
+## 安装版使用
+
+安装版支持 64 位 Windows 10/11。运行安装程序后，可从桌面或开始菜单打开“抖音批量下载工具”。程序使用独立桌面窗口，不会打开外部浏览器，也不要求目标电脑安装 Python、Node.js 或 FFmpeg。
+
+页面、设置和历史批次均保存在当前电脑的 `%LOCALAPPDATA%\DouyinBatchDownloader`。查看界面和历史记录可离线完成；解析与下载公开抖音视频时需要联网。每台电脑只读取自己的本地数据。
+
+关闭桌面窗口会安全停止本地后台。卸载程序不会删除任务历史、设置或已下载的视频。安装包未购买商业代码签名证书，Windows SmartScreen 可能显示“未知发布者”；分发时请同时提供发布页公布的 SHA256。
+
+发生启动错误时，请查看 `%LOCALAPPDATA%\DouyinBatchDownloader\application.log`。
+
 ## 开发运行
 
-要求：Python 3.12、Node.js 20 或更高版本、系统已安装 Microsoft Edge。
+要求：Python 3.11/3.12、Node.js 20 或更高版本、系统已安装 Microsoft Edge。
 
 ```powershell
-python -m pip install -e ".[dev,download,build]"
+python -m pip install -e ".[dev,download,desktop,build]"
 npm --prefix frontend install
 npm --prefix frontend run build
-python run_app.py
+python run_desktop.py
 ```
 
 开发测试：
@@ -32,20 +42,20 @@ python -m pytest -q
 npm --prefix frontend test
 ```
 
-## Windows 打包
+## Windows 安装包构建
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build.ps1
+powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1
 ```
 
-产物位于 `dist\抖音批量下载工具.exe`。前端、Python 后端、yt-dlp、Playwright 驱动和 FFmpeg 都会随 EXE 打包；匿名 Cookie 回退使用 Windows 自带的 Edge，不下载额外浏览器。
+最终产物位于 `release\installer\抖音批量下载工具-Setup-1.0.0-Windows-x64.exe`。安装程序为当前用户安装，无需管理员权限；前端、Python 后端、QtWebEngine、yt-dlp、Playwright 驱动和 FFmpeg 都包含在安装包内。匿名 Cookie 回退使用 Windows 自带的 Edge，不读取用户现有浏览器 Cookie。
 
 ## 使用
 
-1. 双击 EXE，等待默认浏览器自动打开。
+1. 双击桌面或开始菜单中的“抖音批量下载工具”，等待独立窗口打开。
 2. 粘贴抖音链接，每行一条。
 3. 选择下载目录并点击“开始批量下载”。
-4. 浏览器页面可以安全刷新；关闭最后一个工具页面约 3 秒后，程序会自动退出。
+4. 页面可以安全刷新；关闭桌面窗口后，程序会自动退出。
 5. 未完成任务会保存在本机，下次启动时自动恢复为等待状态。
 6. 点击页面右上角“历史批次”打开历史抽屉；需要导入另一组链接时，点击抽屉中的“新建批次”。
 
