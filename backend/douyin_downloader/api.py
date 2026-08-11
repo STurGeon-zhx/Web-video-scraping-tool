@@ -144,7 +144,7 @@ def create_app(
     async def create_batch(request: CreateBatchRequest) -> dict:
         preview = preview_links(request.text)
         if not preview.valid_urls:
-            raise HTTPException(status_code=422, detail="没有识别到有效的公网 HTTPS 链接")
+            raise HTTPException(status_code=422, detail="没有识别到有效的公网 HTTP/HTTPS 链接")
         resolved_urls: list[str] = []
         original_urls: list[str] = []
         seen_urls: set[str] = set()

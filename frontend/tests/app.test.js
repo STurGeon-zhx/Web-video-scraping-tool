@@ -31,8 +31,8 @@ const batchPayload = {
   tasks: [
     {
       id: 1,
-      platform: "bilibili",
-      video_id: "BV1kdKr6qEMF",
+      platform: "direct",
+      video_id: "0123456789abcdef",
       title: "测试视频",
       status: "completed",
       progress: 100,
@@ -84,17 +84,32 @@ test("页面使用多平台名称和链接提示", async () => {
   expect(wrapper.get(".brand h1").text()).toBe("视频批量下载工具");
   expect(wrapper.get("textarea").attributes("aria-label")).toBe("视频链接列表");
   expect(wrapper.get(".import-panel").text()).toContain("抖音、快手、B站");
+  expect(wrapper.get(".import-panel").text()).toContain("视频直链");
+  expect(wrapper.get(".import-panel").text()).toContain("唯品会");
+  expect(wrapper.get("textarea").attributes("placeholder")).toContain(".mp4");
   wrapper.unmount();
 });
 
-test("任务列表展示平台标签", async () => {
+test("任务列表展示视频直链平台标签", async () => {
   const wrapper = await mountApp();
   await wrapper.get(".history-trigger").trigger("click");
   await wrapper.get(".history-actions .secondary-button").trigger("click");
   await flushPromises();
 
-  expect(wrapper.get(".platform-badge").text()).toBe("B站");
+  expect(wrapper.get(".platform-badge").text()).toBe("视频直链");
   wrapper.unmount();
+});
+
+test("任务列表展示唯品会平台标签", async () => {
+  batchPayload.tasks[0].platform = "vipshop";
+  const wrapper = await mountApp();
+  await wrapper.get(".history-trigger").trigger("click");
+  await wrapper.get(".history-actions .secondary-button").trigger("click");
+  await flushPromises();
+
+  expect(wrapper.get(".platform-badge").text()).toBe("唯品会");
+  wrapper.unmount();
+  batchPayload.tasks[0].platform = "direct";
 });
 
 beforeEach(() => {

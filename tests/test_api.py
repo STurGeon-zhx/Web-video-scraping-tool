@@ -164,6 +164,18 @@ def test_preview_returns_counts_and_normalized_urls(tmp_path: Path) -> None:
     }
 
 
+def test_create_batch_invalid_input_mentions_http_and_https(tmp_path: Path) -> None:
+    client, _, _ = make_client(tmp_path)
+
+    response = client.post(
+        "/api/batches",
+        json={"text": "http://127.0.0.1/private.mp4"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "没有识别到有效的公网 HTTP/HTTPS 链接"
+
+
 def test_create_batch_persists_tasks_and_wakes_queue(tmp_path: Path) -> None:
     client, _, queue = make_client(tmp_path)
 

@@ -57,9 +57,34 @@ def _is_kuaishou_url(url: str) -> bool:
     )
 
 
+def _is_vipshop_url(url: str) -> bool:
+    from .vipshop import VipshopIE
+
+    return VipshopIE.suitable(url)
+
+
+def _is_vipshop_detail_domain(url: str) -> bool:
+    return (urlsplit(url).hostname or "").lower() == "detail.vip.com"
+
+
+def _douyin_video_id(url: str) -> str | None:
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+    if hostname != "douyin.com" and not hostname.endswith(".douyin.com"):
+        return None
+    path_parts = parsed.path.strip("/").split("/")
+    if len(path_parts) != 2 or path_parts[0] != "video" or not path_parts[1].isdigit():
+        return None
+    return path_parts[1]
+
+
 def extractor_supports_url(url: str) -> bool:
     if _is_kuaishou_url(url):
         return True
+    if _is_vipshop_url(url):
+        return True
+    if _is_vipshop_detail_domain(url):
+        return False
     from yt_dlp.extractor import gen_extractor_classes
 
     for extractor in gen_extractor_classes():
@@ -67,7 +92,9 @@ def extractor_supports_url(url: str) -> bool:
             continue
         if extractor.suitable(url):
             return True
-    return False
+    from .direct_media import DirectMediaIE
+
+    return DirectMediaIE.suitable(url)
 
 
 def _platform_slug(info: dict[str, Any], url: str) -> str:
@@ -75,10 +102,14 @@ def _platform_slug(info: dict[str, Any], url: str) -> str:
     key = str(info.get("extractor_key") or info.get("extractor") or "").lower()
     if "kuaishou" in key or _is_kuaishou_url(url):
         return "kuaishou"
+    if "vipshop" in key or _is_vipshop_url(url):
+        return "vipshop"
     if "bilibili" in key or hostname == "bilibili.com" or hostname.endswith(".bilibili.com"):
         return "bilibili"
     if "tiktok" in key or hostname == "douyin.com" or hostname.endswith(".douyin.com"):
         return "douyin"
+    if "directmedia" in key or "direct-media" in key:
+        return "direct"
     return key.replace(":", "-") or hostname
 
 
@@ -116,6 +147,25 @@ class BatchExpander:
             "skip_download": True,
         }
         for url, original in zip(urls, originals, strict=True):
+            douyin_video_id = _douyin_video_id(url)
+            if douyin_video_id is not None:
+                key = ("douyin", douyin_video_id)
+                if key in seen:
+                    duplicate_count += 1
+                    continue
+                seen.add(key)
+                videos.append(
+                    ExpandedVideo(
+                        platform="douyin",
+                        video_id=douyin_video_id,
+                        title="",
+                        canonical_url=url,
+                        original_url=original,
+                    )
+                )
+                if len(videos) > self._limit:
+                    raise BatchExpansionError(f"每个批次最多支持 {self._limit} 个视频")
+                continue
             with self._ydl_factory(options) as ydl:
                 info = ydl.extract_info(url, download=False)
             if not isinstance(info, dict):
@@ -138,9 +188,9 @@ class BatchExpander:
                 if not video_id:
                     raise BatchExpansionError("平台没有返回视频 ID")
                 canonical_url = str(entry.get("webpage_url") or entry.get("url") or url)
-                if not canonical_url.startswith("https://"):
-                    canonical_url = url
                 platform = _platform_slug(entry, canonical_url)
+                if platform != "direct" and not canonical_url.startswith("https://"):
+                    canonical_url = url
                 key = (platform, video_id)
                 if key in seen:
                     duplicate_count += 1

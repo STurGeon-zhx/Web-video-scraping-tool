@@ -34,6 +34,8 @@ function platformLabel(platform) {
     kuaishou: "快手",
     bilibili: "B站",
     youtube: "YouTube",
+    direct: "视频直链",
+    vipshop: "唯品会",
   }[platform] || platform || "视频";
 }
 
@@ -318,14 +320,14 @@ onBeforeUnmount(() => {
           <span class="step-number">1</span>
           <div>
             <h3>导入视频链接</h3>
-            <p>支持抖音、快手、B站及 yt-dlp 明确支持的视频平台</p>
+            <p>支持抖音、快手、B站、唯品会商品主视频、视频直链及 yt-dlp 明确支持的视频平台</p>
           </div>
         </div>
         <textarea
           ref="inputElement"
           v-model="inputText"
           aria-label="视频链接列表"
-          placeholder="https://www.douyin.com/video/1234567890123456789&#10;https://www.kuaishou.com/f/xxxxxx&#10;https://www.bilibili.com/video/BVxxxxxxxxxx/"
+          placeholder="https://www.douyin.com/video/1234567890123456789&#10;https://www.kuaishou.com/f/xxxxxx&#10;https://www.bilibili.com/video/BVxxxxxxxxxx/&#10;https://detail.vip.com/detail-品牌ID-商品ID.html&#10;http://cdn.example.com/video.mp4"
           @blur="previewInput"
         ></textarea>
         <div v-if="preview" class="preview-strip">

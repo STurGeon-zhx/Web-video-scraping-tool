@@ -54,10 +54,97 @@ def test_expands_single_bilibili_video_to_platform_task() -> None:
     assert result.platform_counts == {"bilibili": 1}
 
 
-def test_rejects_generic_only_url_without_fetching_it() -> None:
-    assert extractor_supports_url("https://example.com/video/1") is False
+def test_expands_canonical_douyin_video_without_cookie_preflight() -> None:
+    url = "https://www.douyin.com/video/7671100071668413681?modeFrom="
+
+    class FreshCookieYoutubeDL:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def extract_info(self, _url: str, download: bool) -> dict:
+            assert download is False
+            raise RuntimeError("Fresh cookies are needed")
+
+    expander = BatchExpander(ydl_factory=lambda _options: FreshCookieYoutubeDL())
+
+    result = expander.expand([url])
+
+    assert result.videos == [
+        ExpandedVideo(
+            platform="douyin",
+            video_id="7671100071668413681",
+            title="",
+            canonical_url=url,
+            original_url=url,
+        )
+    ]
+    assert result.platform_counts == {"douyin": 1}
+
+
+def test_accepts_direct_media_candidates_but_rejects_unsupported_kuaishou_pages() -> None:
+    assert extractor_supports_url("https://example.com/video/1") is True
+    assert extractor_supports_url("http://cdn.example/video.mp4") is True
     assert extractor_supports_url("https://www.kuaishou.com/profile/author-id") is False
     assert extractor_supports_url("https://www.kuaishou.com/f/X109BY66mOaj1nh") is True
+
+
+def test_accepts_vipshop_product_detail_but_rejects_other_vipshop_pages() -> None:
+    assert extractor_supports_url(
+        "https://detail.vip.com/detail-10007920-6921967044893585744.html"
+    ) is True
+    assert extractor_supports_url("https://detail.vip.com/comment/123") is False
+
+
+def test_expands_vipshop_main_video_with_platform_identity() -> None:
+    url = "https://detail.vip.com/detail-10007920-6921967044893585744.html"
+    info = {
+        "id": "6921967044893585744",
+        "title": "测试商品",
+        "extractor_key": "Vipshop",
+        "webpage_url": url,
+        "formats": [{"url": "https://a.vpimg4.com/main.mp4", "vcodec": "h264"}],
+    }
+    expander = BatchExpander(ydl_factory=lambda _options: FakeYoutubeDL(info))
+
+    result = expander.expand([url])
+
+    assert result.videos == [
+        ExpandedVideo(
+            platform="vipshop",
+            video_id="6921967044893585744",
+            title="测试商品",
+            canonical_url=url,
+            original_url=url,
+        )
+    ]
+    assert result.platform_counts == {"vipshop": 1}
+
+
+def test_expands_http_direct_media_without_upgrading_canonical_url() -> None:
+    url = "http://cdn.example/video.mp4"
+    info = {
+        "id": "0123456789abcdef",
+        "title": "video",
+        "extractor_key": "DirectMedia",
+        "webpage_url": url,
+        "formats": [{"url": url, "vcodec": "unknown"}],
+    }
+    expander = BatchExpander(ydl_factory=lambda _options: FakeYoutubeDL(info))
+
+    result = expander.expand([url])
+
+    assert result.videos == [
+        ExpandedVideo(
+            platform="direct",
+            video_id="0123456789abcdef",
+            title="video",
+            canonical_url=url,
+            original_url=url,
+        )
+    ]
 
 
 def test_rejects_playlist_over_five_hundred_without_partial_result() -> None:

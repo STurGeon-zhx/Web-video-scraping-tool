@@ -1,4 +1,4 @@
-from douyin_downloader.links import extract_candidate_urls, preview_links
+from douyin_downloader.links import extract_candidate_urls, normalize_url, preview_links
 
 
 def test_extracts_direct_short_and_share_text_urls() -> None:
@@ -13,7 +13,7 @@ def test_extracts_direct_short_and_share_text_urls() -> None:
     ]
 
 
-def test_preview_accepts_public_https_candidates_and_deduplicates() -> None:
+def test_preview_accepts_public_http_and_https_candidates_and_deduplicates() -> None:
     text = "\n".join(
         [
             "https://www.douyin.com/video/1234567890123456789",
@@ -28,15 +28,22 @@ def test_preview_accepts_public_https_candidates_and_deduplicates() -> None:
 
     assert preview.valid_urls == [
         "https://www.douyin.com/video/1234567890123456789",
+        "http://www.douyin.com/video/2222222222222222222",
         "https://www.bilibili.com/video/BV1kdKr6qEMF/",
     ]
     assert preview.duplicate_count == 1
-    assert preview.invalid_count == 2
+    assert preview.invalid_count == 1
+
+
+def test_normalize_url_preserves_public_http_scheme_and_default_port() -> None:
+    assert normalize_url("http://VD3.BDSTATIC.COM:80/path/video.mp4") == (
+        "http://vd3.bdstatic.com/path/video.mp4"
+    )
 
 
 def test_preview_rejects_local_and_private_ip_targets() -> None:
     preview = preview_links(
-        "https://localhost/video/123\nhttps://127.0.0.1/video/123\nhttps://192.168.1.2/v"
+        "http://localhost/video.mp4\nhttps://127.0.0.1/video/123\nhttp://192.168.1.2/v.mp4"
     )
 
     assert preview.valid_urls == []

@@ -59,6 +59,7 @@ class ErrorCode(StrEnum):
     INVALID_URL = "invalid_url"
     UNSUPPORTED_PLATFORM = "unsupported_platform"
     KUAISHOU_ACCESS = "kuaishou_access"
+    VIPSHOP_ACCESS = "vipshop_access"
     UNAVAILABLE = "unavailable"
     LOGIN_REQUIRED = "login_required"
     ACCESS_RESTRICTED = "access_restricted"
@@ -75,6 +76,7 @@ ERROR_MESSAGES = {
     ErrorCode.INVALID_URL: "链接格式无效",
     ErrorCode.UNSUPPORTED_PLATFORM: "该平台暂不支持",
     ErrorCode.KUAISHOU_ACCESS: "快手匿名访问失败，请稍后重试",
+    ErrorCode.VIPSHOP_ACCESS: "唯品会匿名访问失败，请稍后重试",
     ErrorCode.UNAVAILABLE: "视频不存在或已被删除",
     ErrorCode.LOGIN_REQUIRED: "该视频需要登录或无权访问",
     ErrorCode.ACCESS_RESTRICTED: "当前网络无法访问该视频",
@@ -119,6 +121,8 @@ def classify_download_error(message: str) -> ErrorCode:
     lowered = message.lower()
     if "快手匿名访问失败" in message:
         return ErrorCode.KUAISHOU_ACCESS
+    if "唯品会匿名访问失败" in message:
+        return ErrorCode.VIPSHOP_ACCESS
     if "受支持的平台专用解析器" in message:
         return ErrorCode.UNSUPPORTED_PLATFORM
     if "429" in lowered or "too many requests" in lowered or "rate limit" in lowered:
@@ -142,10 +146,14 @@ def classify_download_error(message: str) -> ErrorCode:
 
 def _default_ydl_factory(options: dict[str, Any]) -> YoutubeDLSession:
     from yt_dlp import YoutubeDL
+    from .direct_media import DirectMediaIE
     from .kuaishou import KuaishouIE
+    from .vipshop import VipshopIE
 
     downloader = YoutubeDL(options, auto_init=False)
     downloader.add_info_extractor(KuaishouIE())
+    downloader.add_info_extractor(VipshopIE())
+    downloader.add_info_extractor(DirectMediaIE())
     downloader.add_default_info_extractors()
     return downloader
 
@@ -272,6 +280,8 @@ class YtDlpDownloader:
                 "kuaishou": "快手视频",
                 "bilibili": "B站视频",
                 "youtube": "YouTube视频",
+                "direct": "视频直链",
+                "vipshop": "唯品会视频",
             }.get(task.platform, "视频")
             destination = build_unique_output_path(
                 task.output_dir,

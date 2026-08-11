@@ -21,16 +21,17 @@ def extract_candidate_urls(text: str) -> list[str]:
     return [match.group(0).rstrip(TRAILING_PUNCTUATION) for match in URL_PATTERN.finditer(text)]
 
 
-def is_public_https_url(url: str) -> bool:
+def is_public_http_url(url: str) -> bool:
     try:
         parsed = urlsplit(url)
         port = parsed.port
     except ValueError:
         return False
+    scheme = parsed.scheme.lower()
     hostname = (parsed.hostname or "").lower().rstrip(".")
     if (
-        parsed.scheme != "https"
-        or port not in (None, 443)
+        scheme not in {"http", "https"}
+        or port not in (None, 80 if scheme == "http" else 443)
         or parsed.username is not None
         or parsed.password is not None
         or not hostname
@@ -46,22 +47,31 @@ def is_public_https_url(url: str) -> bool:
     return address.is_global
 
 
+def is_public_https_url(url: str) -> bool:
+    try:
+        return urlsplit(url).scheme.lower() == "https" and is_public_http_url(url)
+    except ValueError:
+        return False
+
+
 def is_allowed_douyin_url(url: str) -> bool:
-    """兼容旧调用方；新的输入校验允许所有安全公网 HTTPS 地址。"""
-    return is_public_https_url(url)
+    """兼容旧调用方；新的输入校验允许安全公网 HTTP/HTTPS 地址。"""
+    return is_public_http_url(url)
 
 
 def normalize_url(url: str) -> str:
     parsed = urlsplit(url.strip())
+    scheme = parsed.scheme.lower()
     hostname = (parsed.hostname or "").lower().rstrip(".")
     netloc = hostname
-    if parsed.port and parsed.port != 443:
+    default_port = 80 if scheme == "http" else 443
+    if parsed.port and parsed.port != default_port:
         netloc = f"{hostname}:{parsed.port}"
     path = parsed.path or "/"
     query_items = parse_qsl(parsed.query, keep_blank_values=True)
     if hostname == "bilibili.com" or hostname.endswith(".bilibili.com"):
         query_items = [(key, value) for key, value in query_items if key != "spm_id_from"]
-    return urlunsplit(("https", netloc, path, urlencode(query_items), ""))
+    return urlunsplit((scheme, netloc, path, urlencode(query_items), ""))
 
 
 def preview_links(text: str) -> LinkPreview:
@@ -78,7 +88,7 @@ def preview_links(text: str) -> LinkPreview:
             invalid_count += 1
             continue
         for candidate in candidates:
-            if not is_public_https_url(candidate):
+            if not is_public_http_url(candidate):
                 invalid_count += 1
                 continue
             try:
