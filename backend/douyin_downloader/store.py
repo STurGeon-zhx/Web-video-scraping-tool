@@ -44,6 +44,7 @@ class TaskRecord:
     progress: float
     output_dir: Path
     attempts: int
+    platform: str = "douyin"
 
 
 class Database:
@@ -61,6 +62,7 @@ class Database:
         "attempts",
         "error_code",
         "error_message",
+        "platform",
     }
 
     def __init__(self, path: Path) -> None:
@@ -92,6 +94,7 @@ class Database:
                     batch_id INTEGER NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
                     original_url TEXT NOT NULL,
                     canonical_url TEXT NOT NULL,
+                    platform TEXT NOT NULL DEFAULT 'douyin',
                     video_id TEXT,
                     title TEXT,
                     status TEXT NOT NULL DEFAULT 'queued',
@@ -126,6 +129,17 @@ class Database:
                 connection.execute(
                     "ALTER TABLE batches ADD COLUMN paused INTEGER NOT NULL DEFAULT 0"
                 )
+            task_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(tasks)")
+            }
+            if "platform" not in task_columns:
+                connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN platform TEXT NOT NULL DEFAULT 'douyin'"
+                )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_platform_video ON tasks(platform, video_id)"
+            )
 
     @staticmethod
     def _now() -> str:
@@ -161,6 +175,38 @@ class Database:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
+            )
+            return batch_id
+
+    def create_expanded_batch(self, videos: list[Any], output_dir: Path) -> int:
+        now = self._now()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO batches(output_dir, created_at) VALUES (?, ?)",
+                (str(output_dir), now),
+            )
+            batch_id = int(cursor.lastrowid)
+            connection.executemany(
+                """
+                INSERT INTO tasks(
+                    batch_id, original_url, canonical_url, platform, video_id,
+                    title, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        batch_id,
+                        video.original_url,
+                        video.canonical_url,
+                        video.platform,
+                        video.video_id,
+                        video.title or None,
+                        TaskStatus.QUEUED.value,
+                        now,
+                        now,
+                    )
+                    for video in videos
+                ],
             )
             return batch_id
 
@@ -287,6 +333,7 @@ class Database:
                 progress=float(row["progress"]),
                 output_dir=Path(row["output_dir"]),
                 attempts=int(row["attempts"]),
+                platform=str(row["platform"]),
             )
 
     def update_task(self, task_id: int, **fields: Any) -> None:
@@ -345,7 +392,7 @@ class Database:
     def skip_existing_completed(self, batch_id: int) -> int:
         with self._lock, self._connect() as connection:
             new_tasks = connection.execute(
-                "SELECT id, video_id FROM tasks WHERE batch_id = ? AND video_id IS NOT NULL",
+                "SELECT id, platform, video_id FROM tasks WHERE batch_id = ? AND video_id IS NOT NULL",
                 (batch_id,),
             ).fetchall()
             skipped = 0
@@ -353,11 +400,16 @@ class Database:
                 previous = connection.execute(
                     """
                     SELECT title, output_path FROM tasks
-                    WHERE batch_id != ? AND video_id = ? AND status = ?
+                    WHERE batch_id != ? AND platform = ? AND video_id = ? AND status = ?
                         AND output_path IS NOT NULL
                     ORDER BY id DESC LIMIT 1
                     """,
-                    (batch_id, task["video_id"], TaskStatus.COMPLETED.value),
+                    (
+                        batch_id,
+                        task["platform"],
+                        task["video_id"],
+                        TaskStatus.COMPLETED.value,
+                    ),
                 ).fetchone()
                 if previous is None or not Path(previous["output_path"]).is_file():
                     continue

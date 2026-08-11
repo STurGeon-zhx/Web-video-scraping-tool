@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+import ipaddress
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
@@ -20,20 +21,34 @@ def extract_candidate_urls(text: str) -> list[str]:
     return [match.group(0).rstrip(TRAILING_PUNCTUATION) for match in URL_PATTERN.finditer(text)]
 
 
-def is_allowed_douyin_url(url: str) -> bool:
+def is_public_https_url(url: str) -> bool:
     try:
         parsed = urlsplit(url)
         port = parsed.port
     except ValueError:
         return False
     hostname = (parsed.hostname or "").lower().rstrip(".")
-    return (
-        parsed.scheme == "https"
-        and port in (None, 443)
-        and parsed.username is None
-        and parsed.password is None
-        and (hostname == "douyin.com" or hostname.endswith(".douyin.com"))
-    )
+    if (
+        parsed.scheme != "https"
+        or port not in (None, 443)
+        or parsed.username is not None
+        or parsed.password is not None
+        or not hostname
+        or hostname == "localhost"
+        or hostname.endswith(".localhost")
+        or hostname.endswith(".local")
+    ):
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return True
+    return address.is_global
+
+
+def is_allowed_douyin_url(url: str) -> bool:
+    """兼容旧调用方；新的输入校验允许所有安全公网 HTTPS 地址。"""
+    return is_public_https_url(url)
 
 
 def normalize_url(url: str) -> str:
@@ -43,7 +58,10 @@ def normalize_url(url: str) -> str:
     if parsed.port and parsed.port != 443:
         netloc = f"{hostname}:{parsed.port}"
     path = parsed.path or "/"
-    return urlunsplit(("https", netloc, path, parsed.query, ""))
+    query_items = parse_qsl(parsed.query, keep_blank_values=True)
+    if hostname == "bilibili.com" or hostname.endswith(".bilibili.com"):
+        query_items = [(key, value) for key, value in query_items if key != "spm_id_from"]
+    return urlunsplit(("https", netloc, path, urlencode(query_items), ""))
 
 
 def preview_links(text: str) -> LinkPreview:
@@ -60,7 +78,7 @@ def preview_links(text: str) -> LinkPreview:
             invalid_count += 1
             continue
         for candidate in candidates:
-            if not is_allowed_douyin_url(candidate):
+            if not is_public_https_url(candidate):
                 invalid_count += 1
                 continue
             try:

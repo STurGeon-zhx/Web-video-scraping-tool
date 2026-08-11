@@ -18,7 +18,7 @@ from .launcher import application_data_directory, default_download_directory
 from .local_backend import LocalBackend
 
 
-APP_TITLE = "抖音批量下载工具"
+APP_TITLE = "视频批量下载工具"
 INSTANCE_NAME = "DouyinBatchDownloader.Desktop"
 
 

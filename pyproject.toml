@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "douyin-batch-downloader"
 version = "0.1.0"
-description = "仅在本机运行的抖音公开视频在线播放与批量下载工具"
+description = "仅在本机运行的多平台公开视频批量下载工具"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -19,6 +19,7 @@ dependencies = [
 desktop = ["PySide6>=6.8,<7"]
 download = [
   "yt-dlp>=2026.3.17",
+  "curl-cffi>=0.13,<1",
   "playwright>=1.52,<2",
   "imageio-ffmpeg>=0.6,<1",
 ]

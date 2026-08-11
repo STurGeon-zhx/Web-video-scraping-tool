@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,7 +15,8 @@ from pydantic import BaseModel, Field
 
 from .links import preview_links
 from .page_sessions import PageSessionTracker
-from .resolver import LinkResolutionError, resolve_douyin_url
+from .platforms import BatchExpander, BatchExpansionError, extractor_supports_url
+from .resolver import LinkResolutionError, resolve_public_url
 from .store import Database
 
 
@@ -100,6 +100,7 @@ def create_app(
     shutdown_callback: Callable[[], None],
     static_dir: Path | None = None,
     short_link_resolver: Callable[[str], Awaitable[str]] | None = None,
+    batch_expander: BatchExpander | None = None,
     shutdown_on_page_disconnect: bool = True,
 ) -> FastAPI:
     page_disconnect_callback = shutdown_callback if shutdown_on_page_disconnect else lambda: None
@@ -116,17 +117,18 @@ def create_app(
             await page_sessions.close()
             queue.stop()
 
-    app = FastAPI(title="抖音批量下载工具", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="视频批量下载工具", version="0.2.0", lifespan=lifespan)
     app.state.page_sessions = page_sessions
+    expander = batch_expander or BatchExpander()
 
     async def resolve_short_link(url: str) -> str:
         if short_link_resolver:
             return await short_link_resolver(url)
         async with httpx.AsyncClient(
             timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 DouyinBatchDownloader/0.1"},
+            headers={"User-Agent": "Mozilla/5.0 VideoBatchDownloader/0.2"},
         ) as client:
-            return await resolve_douyin_url(url, client)
+            return await resolve_public_url(url, client)
 
     @app.post("/api/batches/preview")
     async def preview_batch(request: PreviewRequest) -> dict:
@@ -142,19 +144,31 @@ def create_app(
     async def create_batch(request: CreateBatchRequest) -> dict:
         preview = preview_links(request.text)
         if not preview.valid_urls:
-            raise HTTPException(status_code=422, detail="没有识别到有效的抖音链接")
+            raise HTTPException(status_code=422, detail="没有识别到有效的公网 HTTPS 链接")
         resolved_urls: list[str] = []
+        original_urls: list[str] = []
         seen_urls: set[str] = set()
+        resolution_duplicates = 0
         try:
             for url in preview.valid_urls:
-                resolved = url
-                if not re.search(r"/video/\d+", url):
-                    resolved = await resolve_short_link(url)
-                if resolved not in seen_urls:
-                    seen_urls.add(resolved)
-                    resolved_urls.append(resolved)
-        except LinkResolutionError as exc:
+                resolved = await resolve_short_link(url)
+                if not extractor_supports_url(resolved):
+                    raise BatchExpansionError("该链接没有匹配到受支持的平台专用解析器")
+                if resolved in seen_urls:
+                    resolution_duplicates += 1
+                    continue
+                seen_urls.add(resolved)
+                resolved_urls.append(resolved)
+                original_urls.append(url)
+            expansion = await asyncio.to_thread(
+                expander.expand,
+                resolved_urls,
+                original_urls,
+            )
+        except (LinkResolutionError, BatchExpansionError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"平台解析失败: {exc}") from exc
         configured = database.get_setting("download_directory")
         output_dir = Path(request.output_dir or configured or default_download_dir).expanduser().resolve()
         try:
@@ -162,10 +176,21 @@ def create_app(
         except OSError as exc:
             raise HTTPException(status_code=422, detail=f"无法创建下载目录: {exc}") from exc
         database.set_setting("download_directory", str(output_dir))
-        batch_id = database.create_batch(resolved_urls, output_dir)
+        batch_id = database.create_expanded_batch(expansion.videos, output_dir)
         database.skip_existing_completed(batch_id)
         queue.wake()
-        return database.get_batch(batch_id)
+        payload = database.get_batch(batch_id)
+        payload["import_summary"] = {
+            "input_count": expansion.input_count,
+            "expanded_count": len(expansion.videos),
+            "duplicate_count": (
+                preview.duplicate_count
+                + resolution_duplicates
+                + expansion.duplicate_count
+            ),
+            "platform_counts": expansion.platform_counts,
+        }
+        return payload
 
     @app.get("/api/batches")
     async def list_batches(

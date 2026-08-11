@@ -12,7 +12,7 @@ def test_desktop_window_loads_local_app_and_closes_backend(qt_app) -> None:
         on_close=lambda: stopped.append(True),
     )
 
-    assert window.windowTitle() == "抖音批量下载工具"
+    assert window.windowTitle() == "视频批量下载工具"
     assert window.minimumWidth() >= 960
     assert window.minimumHeight() >= 640
     assert window.web_view.url() == QUrl("http://127.0.0.1:8765")

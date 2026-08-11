@@ -1,5 +1,6 @@
 from pathlib import Path
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -173,6 +174,8 @@ def test_any_media_processing_failure_has_specific_user_facing_error(tmp_path: P
         ("No space left on device", ErrorCode.DISK_ERROR),
         ("ffmpeg exited with code 1", ErrorCode.MERGE_ERROR),
         ("Connection timed out", ErrorCode.NETWORK),
+        ("快手匿名访问失败: captcha", ErrorCode.KUAISHOU_ACCESS),
+        ("该链接没有匹配到受支持的平台专用解析器", ErrorCode.UNSUPPORTED_PLATFORM),
         ("unexpected extractor response", ErrorCode.UNKNOWN),
     ],
 )
@@ -195,6 +198,18 @@ def test_adapter_wraps_external_failure_with_chinese_message(tmp_path: Path) -> 
 
     assert caught.value.code == ErrorCode.RATE_LIMITED
     assert caught.value.user_message == "访问过于频繁，任务将在冷却后重试"
+
+
+def test_empty_title_uses_platform_specific_fallback(tmp_path: Path) -> None:
+    task = replace(make_task(tmp_path), platform="bilibili", video_id="BV1kdKr6qEMF")
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: FakeYoutubeDL(options, title=""),
+        ffmpeg_location=None,
+    )
+
+    result = downloader.download(task, lambda _event: None)
+
+    assert result.output_path.name == "B站视频_1234567890123456789.mp4"
 
 
 def test_refreshes_anonymous_cookies_once_when_required(tmp_path: Path) -> None:

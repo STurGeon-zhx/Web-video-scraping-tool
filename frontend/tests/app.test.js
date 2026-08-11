@@ -28,7 +28,21 @@ const batchPayload = {
   output_dir: "D:\\Videos",
   created_at: "2026-08-10T08:00:00+00:00",
   counts: { completed: 1, transcoding: 1 },
-  tasks: [],
+  tasks: [
+    {
+      id: 1,
+      platform: "bilibili",
+      video_id: "BV1kdKr6qEMF",
+      title: "测试视频",
+      status: "completed",
+      progress: 100,
+      downloaded_bytes: 100,
+      total_bytes: 100,
+      speed: null,
+      eta: null,
+      error_message: null,
+    },
+  ],
   pause_reason: null,
   paused: false,
 };
@@ -63,6 +77,25 @@ async function mountApp() {
   await flushPromises();
   return wrapper;
 }
+
+test("页面使用多平台名称和链接提示", async () => {
+  const wrapper = await mountApp();
+
+  expect(wrapper.get(".brand h1").text()).toBe("视频批量下载工具");
+  expect(wrapper.get("textarea").attributes("aria-label")).toBe("视频链接列表");
+  expect(wrapper.get(".import-panel").text()).toContain("抖音、快手、B站");
+  wrapper.unmount();
+});
+
+test("任务列表展示平台标签", async () => {
+  const wrapper = await mountApp();
+  await wrapper.get(".history-trigger").trigger("click");
+  await wrapper.get(".history-actions .secondary-button").trigger("click");
+  await flushPromises();
+
+  expect(wrapper.get(".platform-badge").text()).toBe("B站");
+  wrapper.unmount();
+});
 
 beforeEach(() => {
   FakeEventSource.instances = [];

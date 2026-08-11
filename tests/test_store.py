@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+from douyin_downloader.platforms import ExpandedVideo
 from douyin_downloader.store import Database, TaskStatus
 
 
@@ -75,6 +76,51 @@ def test_initialize_adds_pause_state_to_existing_database(tmp_path: Path) -> Non
     )
 
     assert database.get_batch(batch_id)["paused"] is False
+
+
+def test_initialize_migrates_legacy_tasks_to_douyin_platform(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                output_dir TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id INTEGER NOT NULL,
+                video_id TEXT,
+                status TEXT NOT NULL
+            );
+            INSERT INTO batches(output_dir, created_at) VALUES ('D:/Videos', '2026-01-01');
+            INSERT INTO tasks(batch_id, video_id, status) VALUES (1, '123', 'completed');
+            """
+        )
+
+    Database(path).initialize()
+
+    with sqlite3.connect(path) as connection:
+        platform = connection.execute("SELECT platform FROM tasks WHERE id = 1").fetchone()[0]
+    assert platform == "douyin"
+
+
+def test_creates_expanded_tasks_with_platform_identity(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    videos = [
+        ExpandedVideo("bilibili", "same", "B站", "https://www.bilibili.com/video/same", "https://b23.tv/a"),
+        ExpandedVideo("douyin", "same", "抖音", "https://www.douyin.com/video/same", "https://v.douyin.com/a"),
+    ]
+
+    batch_id = database.create_expanded_batch(videos, tmp_path)
+    tasks = database.get_batch(batch_id)["tasks"]
+
+    assert [(task["platform"], task["video_id"], task["title"]) for task in tasks] == [
+        ("bilibili", "same", "B站"),
+        ("douyin", "same", "抖音"),
+    ]
+    assert tasks[0]["original_url"] == "https://b23.tv/a"
 
 
 def test_recovers_interrupted_tasks_to_queue_on_startup(tmp_path: Path) -> None:

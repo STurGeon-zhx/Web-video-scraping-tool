@@ -28,6 +28,15 @@ const overallProgress = computed(() => {
   return Math.round((completedCount.value * 100) / batch.value.total);
 });
 
+function platformLabel(platform) {
+  return {
+    douyin: "抖音",
+    kuaishou: "快手",
+    bilibili: "B站",
+    youtube: "YouTube",
+  }[platform] || platform || "视频";
+}
+
 async function request(url, options = {}) {
   const response = await fetch(url, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -91,7 +100,7 @@ async function chooseDirectory() {
 
 async function startBatch() {
   if (!inputText.value.trim()) {
-    error.value = "请先粘贴至少一条抖音链接";
+    error.value = "请先粘贴至少一条视频链接";
     return;
   }
   busy.value = true;
@@ -103,6 +112,12 @@ async function startBatch() {
       body: JSON.stringify({ text: inputText.value, output_dir: downloadDirectory.value }),
     });
     batch.value = created;
+    if (created.import_summary) {
+      const platforms = Object.entries(created.import_summary.platform_counts || {})
+        .map(([platform, count]) => `${platformLabel(platform)} ${count}`)
+        .join("、");
+      notice.value = `已创建 ${created.import_summary.expanded_count} 个视频任务${platforms ? `（${platforms}）` : ""}`;
+    }
     inputText.value = "";
     preview.value = null;
     connectEvents(created.id);
@@ -279,7 +294,7 @@ onBeforeUnmount(() => {
       <div class="brand">
         <div class="brand-mark">⬇</div>
         <div>
-          <h1>抖音批量下载</h1>
+          <h1>视频批量下载工具</h1>
           <p>公开视频 · 本机处理 · 批量队列</p>
         </div>
       </div>
@@ -295,7 +310,7 @@ onBeforeUnmount(() => {
       <section class="hero">
         <p class="eyebrow">简单三步</p>
         <h2>粘贴链接，剩下的交给队列</h2>
-        <p>每行一条链接，也可以直接粘贴含文案的抖音分享文本。</p>
+        <p>每行一条链接，也可以直接粘贴含文案的平台分享文本。</p>
       </section>
 
       <section class="panel import-panel">
@@ -303,14 +318,14 @@ onBeforeUnmount(() => {
           <span class="step-number">1</span>
           <div>
             <h3>导入视频链接</h3>
-            <p>支持 www.douyin.com 视频链接和 v.douyin.com 分享短链</p>
+            <p>支持抖音、快手、B站及 yt-dlp 明确支持的视频平台</p>
           </div>
         </div>
         <textarea
           ref="inputElement"
           v-model="inputText"
-          aria-label="抖音链接列表"
-          placeholder="https://www.douyin.com/video/1234567890123456789&#10;https://v.douyin.com/xxxxxx/"
+          aria-label="视频链接列表"
+          placeholder="https://www.douyin.com/video/1234567890123456789&#10;https://www.kuaishou.com/f/xxxxxx&#10;https://www.bilibili.com/video/BVxxxxxxxxxx/"
           @blur="previewInput"
         ></textarea>
         <div v-if="preview" class="preview-strip">
@@ -376,7 +391,7 @@ onBeforeUnmount(() => {
             <tbody>
               <tr v-for="task in batch.tasks" :key="task.id">
                 <td class="video-cell">
-                  <strong>{{ task.title || `待解析视频 #${task.id}` }}</strong>
+                  <strong><span class="platform-badge">{{ platformLabel(task.platform) }}</span>{{ task.title || `待解析视频 #${task.id}` }}</strong>
                   <span>{{ task.video_id || task.original_url }}</span>
                 </td>
                 <td><span class="status-pill" :class="task.status">{{ statusLabel(task.status) }}</span></td>

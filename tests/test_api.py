@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from douyin_downloader.api import create_app, stream_batch_events
+from douyin_downloader.platforms import ExpandedVideo, ExpansionResult
 from douyin_downloader.store import Database, TaskStatus
 
 
@@ -42,6 +43,21 @@ class IdleQueue:
             self.database.set_batch_paused(batch_id, False)
 
 
+class StubExpander:
+    def expand(self, urls: list[str], original_urls: list[str] | None = None) -> ExpansionResult:
+        originals = original_urls or urls
+        videos = []
+        for url, original in zip(urls, originals, strict=True):
+            video_id = url.rstrip("/").rsplit("/", 1)[-1]
+            platform = "bilibili" if "bilibili.com" in url else "douyin"
+            videos.append(ExpandedVideo(platform, video_id, "", url, original))
+        return ExpansionResult(videos, len(urls), 0, {videos[0].platform: len(videos)})
+
+
+async def identity_resolver(url: str) -> str:
+    return url
+
+
 def make_client(tmp_path: Path) -> tuple[TestClient, Database, IdleQueue]:
     database = Database(tmp_path / "api.db")
     database.initialize()
@@ -53,6 +69,8 @@ def make_client(tmp_path: Path) -> tuple[TestClient, Database, IdleQueue]:
         pick_directory=lambda: tmp_path / "picked",
         open_directory=lambda _path: None,
         shutdown_callback=lambda: None,
+        short_link_resolver=identity_resolver,
+        batch_expander=StubExpander(),
     )
     return TestClient(app), database, queue
 
@@ -103,6 +121,7 @@ def test_create_batch_resolves_short_link_before_persisting(tmp_path: Path) -> N
         open_directory=lambda _path: None,
         shutdown_callback=lambda: None,
         short_link_resolver=resolve_short,
+        batch_expander=StubExpander(),
     )
     client = TestClient(app)
 
@@ -113,7 +132,7 @@ def test_create_batch_resolves_short_link_before_persisting(tmp_path: Path) -> N
 
     assert response.status_code == 201
     task = response.json()["tasks"][0]
-    assert task["original_url"] == "https://www.douyin.com/video/1234567890123456789"
+    assert task["original_url"] == "https://v.douyin.com/ABC123/"
     assert task["video_id"] == "1234567890123456789"
 
 
@@ -135,10 +154,13 @@ def test_preview_returns_counts_and_normalized_urls(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json() == {
-        "valid_count": 1,
+        "valid_count": 2,
         "duplicate_count": 1,
-        "invalid_count": 1,
-        "valid_urls": ["https://www.douyin.com/video/1234567890123456789"],
+        "invalid_count": 0,
+        "valid_urls": [
+            "https://www.douyin.com/video/1234567890123456789",
+            "https://example.com/video/1",
+        ],
     }
 
 
@@ -157,7 +179,27 @@ def test_create_batch_persists_tasks_and_wakes_queue(tmp_path: Path) -> None:
     payload = response.json()
     assert payload["total"] == 1
     assert payload["counts"] == {"queued": 1}
+    assert payload["import_summary"] == {
+        "input_count": 1,
+        "expanded_count": 1,
+        "duplicate_count": 0,
+        "platform_counts": {"douyin": 1},
+    }
     assert queue.wake_calls == 1
+
+
+def test_create_batch_persists_bilibili_platform(tmp_path: Path) -> None:
+    client, _, _ = make_client(tmp_path)
+
+    response = client.post(
+        "/api/batches",
+        json={"text": "https://www.bilibili.com/video/BV1kdKr6qEMF/?spm_id_from=1"},
+    )
+
+    assert response.status_code == 201
+    task = response.json()["tasks"][0]
+    assert task["platform"] == "bilibili"
+    assert task["video_id"] == "BV1kdKr6qEMF"
 
 
 def test_create_batch_skips_completed_video_when_file_still_exists(tmp_path: Path) -> None:

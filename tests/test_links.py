@@ -13,13 +13,13 @@ def test_extracts_direct_short_and_share_text_urls() -> None:
     ]
 
 
-def test_preview_rejects_non_douyin_and_insecure_urls_and_deduplicates() -> None:
+def test_preview_accepts_public_https_candidates_and_deduplicates() -> None:
     text = "\n".join(
         [
             "https://www.douyin.com/video/1234567890123456789",
             "https://www.douyin.com/video/1234567890123456789",
             "http://www.douyin.com/video/2222222222222222222",
-            "https://example.com/video/123",
+            "https://www.bilibili.com/video/BV1kdKr6qEMF/?spm_id_from=333.1007",
             "不是链接",
         ]
     )
@@ -27,17 +27,20 @@ def test_preview_rejects_non_douyin_and_insecure_urls_and_deduplicates() -> None
     preview = preview_links(text)
 
     assert preview.valid_urls == [
-        "https://www.douyin.com/video/1234567890123456789"
+        "https://www.douyin.com/video/1234567890123456789",
+        "https://www.bilibili.com/video/BV1kdKr6qEMF/",
     ]
     assert preview.duplicate_count == 1
-    assert preview.invalid_count == 3
+    assert preview.invalid_count == 2
 
 
-def test_does_not_accept_douyin_lookalike_domain() -> None:
-    preview = preview_links("https://douyin.com.evil.example/video/123")
+def test_preview_rejects_local_and_private_ip_targets() -> None:
+    preview = preview_links(
+        "https://localhost/video/123\nhttps://127.0.0.1/video/123\nhttps://192.168.1.2/v"
+    )
 
     assert preview.valid_urls == []
-    assert preview.invalid_count == 1
+    assert preview.invalid_count == 3
 
 
 def test_invalid_port_is_counted_as_invalid_instead_of_crashing() -> None:
