@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -60,6 +61,30 @@ def test_page_session_grace_covers_slow_browser_reconnect(tmp_path: Path) -> Non
     client, _, _ = make_client(tmp_path)
 
     assert client.app.state.page_sessions.grace_seconds >= 30
+
+
+@pytest.mark.asyncio
+async def test_desktop_app_ignores_page_session_disconnect(tmp_path: Path) -> None:
+    shutdown_calls: list[bool] = []
+    database = Database(tmp_path / "desktop.db")
+    database.initialize()
+    queue = IdleQueue(database)
+    app = create_app(
+        database,
+        queue,
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: shutdown_calls.append(True),
+        shutdown_on_page_disconnect=False,
+    )
+    tracker = app.state.page_sessions
+
+    await tracker.connect()
+    await tracker.disconnect()
+    await asyncio.sleep(0.02)
+
+    assert shutdown_calls == []
 
 
 def test_create_batch_resolves_short_link_before_persisting(tmp_path: Path) -> None:

@@ -100,8 +100,10 @@ def create_app(
     shutdown_callback: Callable[[], None],
     static_dir: Path | None = None,
     short_link_resolver: Callable[[str], Awaitable[str]] | None = None,
+    shutdown_on_page_disconnect: bool = True,
 ) -> FastAPI:
-    page_sessions = PageSessionTracker(shutdown_callback, grace_seconds=30.0)
+    page_disconnect_callback = shutdown_callback if shutdown_on_page_disconnect else lambda: None
+    page_sessions = PageSessionTracker(page_disconnect_callback, grace_seconds=30.0)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
