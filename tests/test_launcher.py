@@ -53,6 +53,7 @@ def test_server_config_works_when_windowed_exe_has_no_stderr(monkeypatch) -> Non
     assert config.host == "127.0.0.1"
     assert config.port == 8765
     assert config.log_config is None
+    assert config.timeout_graceful_shutdown == 5
 
 
 def test_create_downloader_reuses_anonymous_cookie_file(monkeypatch, tmp_path: Path) -> None:

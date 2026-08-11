@@ -56,6 +56,12 @@ def make_client(tmp_path: Path) -> tuple[TestClient, Database, IdleQueue]:
     return TestClient(app), database, queue
 
 
+def test_page_session_grace_covers_slow_browser_reconnect(tmp_path: Path) -> None:
+    client, _, _ = make_client(tmp_path)
+
+    assert client.app.state.page_sessions.grace_seconds >= 30
+
+
 def test_create_batch_resolves_short_link_before_persisting(tmp_path: Path) -> None:
     database = Database(tmp_path / "short.db")
     database.initialize()

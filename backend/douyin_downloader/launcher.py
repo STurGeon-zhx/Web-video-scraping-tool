@@ -83,6 +83,7 @@ def create_server_config(app: Any, port: int) -> uvicorn.Config:
         log_level="info",
         access_log=False,
         log_config=None,
+        timeout_graceful_shutdown=5,
     )
 
 
