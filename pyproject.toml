@@ -33,6 +33,7 @@ build = [
 
 [project.scripts]
 douyin-batch-downloader = "douyin_downloader.launcher:main"
+douyin-batch-downloader-desktop = "douyin_downloader.desktop:main"
 
 [tool.setuptools]
 package-dir = {"" = "backend"}
