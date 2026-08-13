@@ -13,7 +13,7 @@
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
-button, textarea { font: inherit; }
+button, textarea, input { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: .65; }
 body.history-drawer-open { overflow: hidden; }
@@ -42,6 +42,8 @@ body.history-drawer-open { overflow: hidden; }
 .history-trigger { display: flex; align-items: center; gap: 7px; border: 1px solid #cbd5e1; color: #344054; background: white; border-radius: 9px; padding: 8px 12px; font-weight: 650; }
 .history-trigger:hover { border-color: #84adff; color: var(--blue); background: #f8fafc; }
 .history-trigger strong { min-width: 20px; height: 20px; display: inline-grid; place-items: center; border-radius: 999px; color: white; background: var(--blue); font-size: 11px; }
+.feature-nav-button { border: 1px solid #b2ccff; color: var(--blue); background: #eff6ff; border-radius: 9px; padding: 8px 12px; font-weight: 700; }
+.feature-nav-button:hover { border-color: #84adff; background: #dbeafe; }
 
 main { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 54px 0 32px; }
 .hero { text-align: center; margin-bottom: 30px; }
@@ -62,6 +64,12 @@ textarea:focus { background: white; border-color: #84adff; box-shadow: 0 0 0 4px
 .preview-strip .ok { color: var(--green); }
 .preview-strip .warn { color: var(--red); }
 .directory-row { gap: 14px; margin: 22px 0; padding: 15px; background: #f8fafc; border: 1px solid #e5eaf1; border-radius: 12px; }
+.page-options { margin-top: 18px; }
+.count-field { display: flex; align-items: center; gap: 14px; padding: 15px; background: #f8fafc; border: 1px solid #e5eaf1; border-radius: 12px; }
+.count-copy { flex: 1; display: grid; gap: 3px; }
+.count-copy small { color: var(--muted); }
+.count-field input { width: 100px; padding: 9px 11px; color: #172b4d; background: white; border: 1px solid #cbd5e1; border-radius: 9px; outline: none; }
+.count-field input:focus { border-color: #84adff; box-shadow: 0 0 0 3px #eff4ff; }
 .directory-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }
 .directory-copy span { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .secondary-button { border: 1px solid #cbd5e1; color: #344054; background: white; border-radius: 9px; padding: 9px 14px; font-weight: 650; }
@@ -75,6 +83,9 @@ textarea:focus { background: white; border-color: #84adff; box-shadow: 0 0 0 4px
 .notice-alert { color: #175cd3; background: #eff8ff; border: 1px solid #b2ddff; }
 
 .task-panel { margin-top: 28px; padding: 26px; }
+.collection-status { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 18px; padding: 14px 16px; color: #175cd3; background: #eff8ff; border: 1px solid #b2ddff; border-radius: 12px; }
+.collection-status > div { display: grid; gap: 4px; }
+.collection-status span, .collection-status p { margin: 0; color: var(--muted); font-size: 12px; }
 .task-header { justify-content: space-between; margin-bottom: 20px; }
 .task-actions { gap: 10px; }
 .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
@@ -123,6 +134,7 @@ tbody tr:last-child td { border-bottom: 0; }
 .history-item { display: grid; grid-template-columns: 1fr; gap: 12px; padding: 15px; background: #f8fafc; border: 1px solid #e5eaf1; border-radius: 12px; }
 .history-copy { min-width: 0; display: grid; gap: 4px; }
 .history-copy span { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-type-badge { display: inline-block; margin-right: 7px; padding: 2px 7px; color: #175cd3; background: #e8f0ff; border-radius: 999px; font-size: 11px; }
 .history-counts { display: flex; flex-wrap: wrap; gap: 8px 12px; color: var(--muted); font-size: 12px; }
 .success-text { color: var(--green); }
 .failure-text { color: var(--red); }
@@ -136,6 +148,8 @@ footer { color: #98a2b3; text-align: center; font-size: 12px; padding: 28px 0 8p
 @media (max-width: 760px) {
   .topbar { padding: 0 16px; }
   .privacy-badge { display: none; }
+  .topbar-actions { gap: 8px; }
+  .feature-nav-button { padding: 8px 9px; font-size: 12px; }
   main { width: min(100% - 24px, 1180px); padding-top: 34px; }
   .import-panel, .task-panel { padding: 18px; border-radius: 15px; }
   .start-row, .task-header { align-items: stretch; flex-direction: column; }

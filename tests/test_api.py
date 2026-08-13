@@ -54,6 +54,28 @@ class StubExpander:
         return ExpansionResult(videos, len(urls), 0, {videos[0].platform: len(videos)})
 
 
+class StubPageManager:
+    def __init__(self) -> None:
+        self.submitted: list[int] = []
+        self.cancelled: list[int] = []
+        self.resumed: list[int] = []
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def submit(self, batch_id: int) -> None:
+        self.submitted.append(batch_id)
+
+    def cancel_batch(self, batch_id: int) -> None:
+        self.cancelled.append(batch_id)
+
+    def resume_batch(self, batch_id: int) -> None:
+        self.resumed.append(batch_id)
+
+
 async def identity_resolver(url: str) -> str:
     return url
 
@@ -198,6 +220,132 @@ def test_create_batch_persists_tasks_and_wakes_queue(tmp_path: Path) -> None:
         "platform_counts": {"douyin": 1},
     }
     assert queue.wake_calls == 1
+
+
+def test_create_page_batch_returns_immediately_and_starts_collection(tmp_path: Path) -> None:
+    database = Database(tmp_path / "page-api.db")
+    database.initialize()
+    queue = IdleQueue(database)
+    page_manager = StubPageManager()
+    app = create_app(
+        database,
+        queue,
+        default_download_dir=tmp_path / "downloads",
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        short_link_resolver=identity_resolver,
+        page_collection_manager=page_manager,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/batches",
+        json={
+            "text": "https://www.douyin.com/search/food",
+            "output_dir": str(tmp_path / "videos"),
+            "source_mode": "page",
+            "max_items": 50,
+        },
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["source_mode"] == "page"
+    assert payload["requested_count"] == 50
+    assert payload["collection_status"] == "pending"
+    assert payload["total"] == 0
+    assert page_manager.submitted == [payload["id"]]
+    assert queue.wake_calls == 0
+
+
+def test_page_batch_requires_exactly_one_public_page_url(tmp_path: Path) -> None:
+    database = Database(tmp_path / "page-validation.db")
+    database.initialize()
+    page_manager = StubPageManager()
+    app = create_app(
+        database,
+        IdleQueue(database),
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        short_link_resolver=identity_resolver,
+        page_collection_manager=page_manager,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/batches",
+        json={
+            "text": "https://example.com/one\nhttps://example.com/two",
+            "source_mode": "page",
+            "max_items": 10,
+        },
+    )
+
+    assert response.status_code == 422
+    assert "一个页面链接" in response.json()["detail"]
+    assert page_manager.submitted == []
+
+
+def test_page_batch_rejects_unsupported_douyin_search_tab(tmp_path: Path) -> None:
+    database = Database(tmp_path / "page-search-type.db")
+    database.initialize()
+    page_manager = StubPageManager()
+    app = create_app(
+        database,
+        IdleQueue(database),
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        short_link_resolver=identity_resolver,
+        page_collection_manager=page_manager,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/batches",
+        json={
+            "text": "https://www.douyin.com/search/风景?type=user",
+            "source_mode": "page",
+            "max_items": 10,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "不支持的抖音搜索类型: user"
+    assert page_manager.submitted == []
+
+
+def test_page_batch_resume_and_delete_control_page_collector(tmp_path: Path) -> None:
+    database = Database(tmp_path / "page-control.db")
+    database.initialize()
+    queue = IdleQueue(database)
+    page_manager = StubPageManager()
+    app = create_app(
+        database,
+        queue,
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        short_link_resolver=identity_resolver,
+        page_collection_manager=page_manager,
+    )
+    client = TestClient(app)
+    batch_id = database.create_page_batch("https://example.com/videos", 10, tmp_path)
+
+    paused = client.post(f"/api/batches/{batch_id}/pause")
+    resumed = client.post(f"/api/batches/{batch_id}/resume")
+    deleted = client.delete(f"/api/batches/{batch_id}")
+
+    assert paused.status_code == 200
+    assert resumed.status_code == 200
+    assert page_manager.resumed == [batch_id]
+    assert deleted.status_code == 200
+    assert page_manager.cancelled == [batch_id]
 
 
 def test_create_batch_persists_bilibili_platform(tmp_path: Path) -> None:

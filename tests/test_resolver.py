@@ -152,3 +152,21 @@ def test_probe_rejects_non_video_response() -> None:
                 client=client,
                 dns_resolver=lambda _host: ["8.8.8.8"],
             )
+
+
+def test_probe_accepts_public_hls_manifest() -> None:
+    with httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={"content-type": "application/vnd.apple.mpegurl"},
+            )
+        )
+    ) as client:
+        result = probe_public_video_url(
+            "https://cdn.example/master.m3u8",
+            client=client,
+            dns_resolver=lambda _host: ["8.8.8.8"],
+        )
+
+    assert result.content_type == "application/vnd.apple.mpegurl"

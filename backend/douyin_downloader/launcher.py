@@ -17,6 +17,7 @@ from platformdirs import user_data_path
 from .api import create_app
 from .cookies import AnonymousCookieProvider
 from .downloader import YtDlpDownloader
+from .page_collector import BrowserPageCollector, PageCollectionManager, PlaywrightBrowserSession
 from .queue import TaskQueue
 from .store import Database
 
@@ -39,7 +40,7 @@ def should_open_browser() -> bool:
 
 
 def default_download_directory() -> Path:
-    return Path.home() / "Videos" / "抖音批量下载"
+    return Path.home() / "Videos" / "视频批量下载"
 
 
 def select_available_port() -> int:
@@ -163,6 +164,13 @@ def main() -> None:
         logging.info("启动阶段: FFmpeg 路径=%s", ffmpeg_path)
         downloader = create_downloader(data_dir, ffmpeg_path)
         queue = TaskQueue(database, downloader, worker_count=2)
+        page_manager = PageCollectionManager(
+            database,
+            queue,
+            lambda _url: BrowserPageCollector(
+                lambda: PlaywrightBrowserSession(data_dir / "browser")
+            ),
+        )
         port = select_available_port()
         logging.info("启动阶段: 已选择端口 %s", port)
         server_holder: dict[str, uvicorn.Server] = {}
@@ -187,6 +195,7 @@ def main() -> None:
             open_directory=_open_directory,
             shutdown_callback=request_shutdown,
             static_dir=frontend_dir,
+            page_collection_manager=page_manager,
         )
         config = create_server_config(app, port)
         server = uvicorn.Server(config)

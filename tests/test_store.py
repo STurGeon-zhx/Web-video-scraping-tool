@@ -245,3 +245,114 @@ def test_persists_settings(tmp_path: Path) -> None:
     database.set_setting("download_directory", "D:/Videos/抖音批量下载")
 
     assert database.get_setting("download_directory") == "D:/Videos/抖音批量下载"
+
+
+def test_creates_page_batch_and_exposes_collection_state(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+
+    batch_id = database.create_page_batch(
+        "https://www.douyin.com/search/%E7%BE%8E%E9%A3%9F",
+        requested_count=50,
+        output_dir=tmp_path / "downloads",
+    )
+
+    batch = database.get_batch(batch_id)
+    assert batch["source_mode"] == "page"
+    assert batch["source_url"].startswith("https://www.douyin.com/search/")
+    assert batch["requested_count"] == 50
+    assert batch["collected_count"] == 0
+    assert batch["collection_status"] == "pending"
+    assert batch["collection_stop_reason"] is None
+    assert batch["tasks"] == []
+
+
+def test_appends_unique_page_videos_in_discovery_order(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    batch_id = database.create_page_batch(
+        "https://www.douyin.com/search/food",
+        requested_count=2,
+        output_dir=tmp_path,
+    )
+    first = ExpandedVideo(
+        "douyin",
+        "111",
+        "first",
+        "https://www.douyin.com/video/111",
+        "https://www.douyin.com/search/food",
+    )
+    second = ExpandedVideo(
+        "douyin",
+        "222",
+        "second",
+        "https://www.douyin.com/video/222",
+        "https://www.douyin.com/search/food",
+    )
+
+    assert database.append_page_video(batch_id, first) is True
+    assert database.append_page_video(batch_id, first) is False
+    assert database.append_page_video(batch_id, second) is True
+
+    batch = database.get_batch(batch_id)
+    assert batch["collected_count"] == 2
+    assert [task["video_id"] for task in batch["tasks"]] == ["111", "222"]
+
+
+def test_page_batch_never_collects_more_than_requested_count(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    batch_id = database.create_page_batch(
+        "https://example.com/videos",
+        requested_count=1,
+        output_dir=tmp_path,
+    )
+
+    assert database.append_page_video(
+        batch_id,
+        ExpandedVideo("direct", "one", "one", "https://cdn.example.com/1.mp4", "https://example.com/videos"),
+    ) is True
+    assert database.append_page_video(
+        batch_id,
+        ExpandedVideo("direct", "two", "two", "https://cdn.example.com/2.mp4", "https://example.com/videos"),
+    ) is False
+
+    assert database.get_batch(batch_id)["collected_count"] == 1
+
+
+def test_initialize_migrates_existing_batches_to_link_mode(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-batches.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                output_dir TEXT NOT NULL,
+                paused INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO batches(output_dir, paused, created_at) VALUES ('D:/Videos', 0, '2026-01-01')"
+        )
+
+    database = Database(path)
+    database.initialize()
+
+    batch = database.get_batch(1)
+    assert batch["source_mode"] == "links"
+    assert batch["source_url"] is None
+    assert batch["collection_status"] is None
+
+
+def test_updates_collection_status_and_lists_resumable_page_batches(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    pending_id = database.create_page_batch("https://example.com/one", 5, tmp_path)
+    collecting_id = database.create_page_batch("https://example.com/two", 5, tmp_path)
+    completed_id = database.create_page_batch("https://example.com/three", 5, tmp_path)
+
+    database.update_collection(collecting_id, "collecting")
+    database.update_collection(completed_id, "page_ended", "页面已结束")
+
+    assert database.list_resumable_page_batches() == [pending_id, collecting_id]
+    completed = database.get_batch(completed_id)
+    assert completed["collection_status"] == "page_ended"
+    assert completed["collection_stop_reason"] == "页面已结束"

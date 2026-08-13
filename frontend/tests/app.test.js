@@ -113,6 +113,7 @@ test("任务列表展示唯品会平台标签", async () => {
 });
 
 beforeEach(() => {
+  window.location.hash = "#/links";
   FakeEventSource.instances = [];
   vi.stubGlobal("EventSource", FakeEventSource);
   vi.stubGlobal("fetch", vi.fn(async (url) => {
@@ -318,4 +319,78 @@ test("当前批次处理中数量包含兼容转换任务", async () => {
 
   expect(wrapper.get(".metrics").text()).toContain("处理中1");
   wrapper.unmount();
+});
+
+describe("页面批量下载功能页", () => {
+  test("顶部按钮通过 Hash 进入独立页面并可返回", async () => {
+    const wrapper = await mountApp();
+
+    await wrapper.get(".page-download-nav").trigger("click");
+    await nextTick();
+
+    expect(window.location.hash).toBe("#/pages");
+    expect(wrapper.get("textarea").attributes("aria-label")).toBe("页面链接");
+    expect(wrapper.text()).toContain("页面内视频批量下载");
+
+    await wrapper.get(".links-download-nav").trigger("click");
+    await nextTick();
+    expect(window.location.hash).toBe("#/links");
+    expect(wrapper.get("textarea").attributes("aria-label")).toBe("视频链接列表");
+    wrapper.unmount();
+  });
+
+  test("刷新页面后保持在页面批量下载功能页", async () => {
+    window.location.hash = "#/pages";
+
+    const wrapper = await mountApp();
+
+    expect(wrapper.get("textarea").attributes("aria-label")).toBe("页面链接");
+    expect(wrapper.get("input[type='number']").element.value).toBe("50");
+    wrapper.unmount();
+  });
+
+  test("按设定数量创建页面采集批次", async () => {
+    window.location.hash = "#/pages";
+    fetch.mockImplementation(async (url, options = {}) => {
+      if (url === "/api/settings") return jsonResponse({ download_directory: "D:\\Videos" });
+      if (url === "/api/batches?page=1&page_size=20") return jsonResponse(historyPayload);
+      if (url === "/api/batches" && options.method === "POST") {
+        return jsonResponse({
+          id: 9,
+          total: 0,
+          counts: {},
+          tasks: [],
+          source_mode: "page",
+          source_url: "https://www.douyin.com/search/food",
+          requested_count: 5,
+          collected_count: 0,
+          collection_status: "pending",
+          collection_stop_reason: null,
+          paused: false,
+        });
+      }
+      throw new Error(`未处理的测试请求: ${url}`);
+    });
+    const wrapper = await mountApp();
+    await wrapper.get("textarea").setValue("https://www.douyin.com/search/food");
+    await wrapper.get("input[type='number']").setValue(5);
+
+    await wrapper.get(".page-start-button").trigger("click");
+    await flushPromises();
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/batches",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          text: "https://www.douyin.com/search/food",
+          output_dir: "D:\\Videos",
+          source_mode: "page",
+          max_items: 5,
+        }),
+      }),
+    );
+    expect(wrapper.get(".collection-status").text()).toContain("等待开始采集");
+    wrapper.unmount();
+  });
 });

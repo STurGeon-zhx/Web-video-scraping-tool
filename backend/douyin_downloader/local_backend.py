@@ -18,6 +18,7 @@ from .launcher import (
     find_frontend_directory,
     select_available_port,
 )
+from .page_collector import BrowserPageCollector, PageCollectionManager, PlaywrightBrowserSession
 from .queue import TaskQueue
 from .store import Database
 
@@ -54,6 +55,13 @@ class LocalBackend:
         database = Database(self.data_dir / "tasks.db")
         downloader = create_downloader(self.data_dir, find_ffmpeg())
         queue = TaskQueue(database, downloader, worker_count=2)
+        page_manager = PageCollectionManager(
+            database,
+            queue,
+            lambda _url: BrowserPageCollector(
+                lambda: PlaywrightBrowserSession(self.data_dir / "browser")
+            ),
+        )
         port = select_available_port()
 
         def request_shutdown() -> None:
@@ -68,6 +76,7 @@ class LocalBackend:
             open_directory=self.open_directory,
             shutdown_callback=request_shutdown,
             static_dir=find_frontend_directory(),
+            page_collection_manager=page_manager,
             shutdown_on_page_disconnect=False,
         )
         server = uvicorn.Server(create_server_config(app, port))

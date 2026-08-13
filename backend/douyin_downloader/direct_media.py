@@ -91,6 +91,33 @@ class DirectMediaIE(InfoExtractor):
             raise ExtractorError(str(exc), expected=True) from exc
         video_id = hashlib.sha256(probe.final_url.encode("utf-8")).hexdigest()[:16]
         extension = _extension(probe)
+        if probe.content_type in {
+            "application/vnd.apple.mpegurl",
+            "application/x-mpegurl",
+        } or extension == "m3u8":
+            formats = self._extract_m3u8_formats(
+                probe.final_url,
+                video_id,
+                ext="mp4",
+            )
+            return {
+                "id": video_id,
+                "title": _title(probe, video_id),
+                "webpage_url": probe.final_url,
+                "extractor_key": "DirectMedia",
+                "ext": "mp4",
+                "formats": formats,
+            }
+        if probe.content_type == "application/dash+xml" or extension == "mpd":
+            formats = self._extract_mpd_formats(probe.final_url, video_id)
+            return {
+                "id": video_id,
+                "title": _title(probe, video_id),
+                "webpage_url": probe.final_url,
+                "extractor_key": "DirectMedia",
+                "ext": "mp4",
+                "formats": formats,
+            }
         media_format: dict[str, Any] = {
             "url": probe.final_url,
             "format_id": "direct",

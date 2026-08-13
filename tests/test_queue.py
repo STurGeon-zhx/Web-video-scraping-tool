@@ -94,6 +94,43 @@ def test_network_failure_retries_three_times_then_succeeds(tmp_path: Path) -> No
     assert task["output_path"] == str(tmp_path / "完成.mp4")
 
 
+def test_unexpected_task_preparation_error_fails_only_that_task_and_queue_continues(tmp_path: Path) -> None:
+    database, batch_id = make_database(tmp_path, 2)
+
+    class SuccessfulDownloader:
+        calls = 0
+
+        def download(self, task, on_progress):
+            self.calls += 1
+            output = tmp_path / f"{task.id}.mp4"
+            output.write_bytes(b"video")
+            return DownloadResult(task.video_id or "unknown", "完成", output)
+
+    downloader = SuccessfulDownloader()
+    queue = TaskQueue(database, downloader, worker_count=1, retry_delays=(0, 0))
+    original_disk_check = queue._has_disk_space
+    disk_checks = 0
+
+    def fail_first_disk_check(directory):
+        nonlocal disk_checks
+        disk_checks += 1
+        if disk_checks == 1:
+            raise OSError("temporary task path error")
+        return original_disk_check(directory)
+
+    queue._has_disk_space = fail_first_disk_check  # type: ignore[method-assign]
+    queue.start()
+    try:
+        wait_until(
+            lambda: database.get_batch(batch_id)["counts"]
+            == {"failed": 1, "completed": 1}
+        )
+    finally:
+        queue.stop()
+
+    assert downloader.calls == 1
+
+
 def test_cancel_active_batch_removes_only_its_partial_files(tmp_path: Path) -> None:
     database, batch_id = make_database(tmp_path, 1)
     started = threading.Event()

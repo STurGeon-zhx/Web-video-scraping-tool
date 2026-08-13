@@ -114,29 +114,39 @@ class TaskQueue:
 
     def _worker_loop(self) -> None:
         while not self._stop_event.is_set():
-            task = self.database.claim_next_task()
-            if task is None:
-                self._wake_event.wait(0.2)
-                self._wake_event.clear()
-                continue
-            if self._is_cancelled(task.batch_id):
-                self._cleanup_partial_files(task)
-                continue
-            if self._is_paused(task.batch_id):
-                self.database.update_task(task.id, status=TaskStatus.QUEUED)
-                continue
-            if not self._has_disk_space(task.output_dir):
-                self.pause_reason = "磁盘剩余空间不足 1 GB，队列已暂停"
-                self.database.update_task(
-                    task.id,
-                    status=TaskStatus.QUEUED,
-                    error_code=ErrorCode.DISK_ERROR.value,
-                    error_message=self.pause_reason,
-                )
-                self._stop_event.wait(1.0)
-                continue
-            self.pause_reason = None
-            self._process_task(task)
+            task: TaskRecord | None = None
+            try:
+                task = self.database.claim_next_task()
+                if task is None:
+                    self._wake_event.wait(0.2)
+                    self._wake_event.clear()
+                    continue
+                if self._is_cancelled(task.batch_id):
+                    self._cleanup_partial_files(task)
+                    continue
+                if self._is_paused(task.batch_id):
+                    self.database.update_task(task.id, status=TaskStatus.QUEUED)
+                    continue
+                if not self._has_disk_space(task.output_dir):
+                    self.pause_reason = "磁盘剩余空间不足 1 GB，队列已暂停"
+                    self.database.update_task(
+                        task.id,
+                        status=TaskStatus.QUEUED,
+                        error_code=ErrorCode.DISK_ERROR.value,
+                        error_message=self.pause_reason,
+                    )
+                    self._stop_event.wait(1.0)
+                    continue
+                self.pause_reason = None
+                self._process_task(task)
+            except Exception as exc:
+                if task is not None:
+                    self.database.update_task(
+                        task.id,
+                        status=TaskStatus.FAILED,
+                        error_code=ErrorCode.UNKNOWN.value,
+                        error_message=f"{ERROR_MESSAGES[ErrorCode.UNKNOWN]}: {exc}",
+                    )
 
     def _has_disk_space(self, directory: Path) -> bool:
         directory.mkdir(parents=True, exist_ok=True)

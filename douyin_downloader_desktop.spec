@@ -5,7 +5,7 @@ datas = [("frontend/dist", "frontend")]
 binaries = []
 hiddenimports = collect_submodules("yt_dlp")
 
-for package in ("imageio_ffmpeg", "playwright", "certifi"):
+for package in ("imageio_ffmpeg", "playwright", "certifi", "curl_cffi"):
     package_datas, package_binaries, package_hidden = collect_all(package)
     datas += package_datas
     binaries += package_binaries
@@ -31,7 +31,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="抖音批量下载工具",
+    name="视频批量下载工具",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -51,5 +51,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="抖音批量下载工具",
+    name="视频批量下载工具",
 )

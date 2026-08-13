@@ -61,3 +61,24 @@ def test_direct_extractor_does_not_shadow_dedicated_platforms() -> None:
     assert DirectMediaIE.suitable(
         "https://detail.vip.com/detail-10007920-6921967044893585744.html"
     ) is False
+
+
+def test_extracts_hls_manifest_formats() -> None:
+    probe = DirectMediaProbe(
+        "https://cdn.example/master.m3u8",
+        "application/vnd.apple.mpegurl",
+        None,
+        None,
+    )
+
+    class HlsIE(DirectMediaIE):
+        def _extract_m3u8_formats(self, url, video_id, ext="mp4", **_kwargs):
+            assert url == probe.final_url
+            assert ext == "mp4"
+            return [{"url": url, "format_id": "hls", "ext": "mp4"}]
+
+    info = HlsIE(probe=lambda _url: probe)._real_extract(probe.final_url)
+
+    assert info["formats"] == [
+        {"url": probe.final_url, "format_id": "hls", "ext": "mp4"}
+    ]

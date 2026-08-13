@@ -16,6 +16,17 @@ class LinkResolutionError(ValueError):
     pass
 
 
+MANIFEST_CONTENT_TYPES = {
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "application/dash+xml",
+}
+
+
+def _is_video_content_type(content_type: str) -> bool:
+    return content_type.startswith("video/") or content_type in MANIFEST_CONTENT_TYPES
+
+
 @dataclass(slots=True, frozen=True)
 class DirectMediaProbe:
     final_url: str
@@ -143,13 +154,13 @@ def probe_public_video_url(
 
                     content_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
                     if method == "HEAD" and (
-                        response.status_code >= 400 or not content_type.startswith("video/")
+                        response.status_code >= 400 or not _is_video_content_type(content_type)
                     ):
                         method = "GET"
                         continue
                     if response.status_code >= 400:
                         raise LinkResolutionError(f"视频直链访问失败: HTTP {response.status_code}")
-                    if not content_type.startswith("video/"):
+                    if not _is_video_content_type(content_type):
                         raise LinkResolutionError("链接响应不是可下载的视频直链")
                     return DirectMediaProbe(
                         final_url=normalize_url(current),

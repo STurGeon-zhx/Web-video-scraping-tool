@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Awaitable, Protocol
+from typing import Awaitable, Literal, Protocol
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, status
@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .links import preview_links
+from .page_collector import douyin_search_mode, is_douyin_search_url
 from .page_sessions import PageSessionTracker
 from .platforms import BatchExpander, BatchExpansionError, extractor_supports_url
 from .resolver import LinkResolutionError, resolve_public_url
@@ -36,12 +37,22 @@ class QueueController(Protocol):
     def resume_batch(self, batch_id: int) -> None: ...
 
 
+class PageCollectionController(Protocol):
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def submit(self, batch_id: int) -> None: ...
+    def cancel_batch(self, batch_id: int) -> None: ...
+    def resume_batch(self, batch_id: int) -> None: ...
+
+
 class PreviewRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500_000)
 
 
 class CreateBatchRequest(PreviewRequest):
     output_dir: str | None = None
+    source_mode: Literal["links", "page"] = "links"
+    max_items: int = Field(default=50, ge=1, le=500)
 
 
 def _batch_or_404(database: Database, batch_id: int) -> dict:
@@ -101,6 +112,7 @@ def create_app(
     static_dir: Path | None = None,
     short_link_resolver: Callable[[str], Awaitable[str]] | None = None,
     batch_expander: BatchExpander | None = None,
+    page_collection_manager: PageCollectionController | None = None,
     shutdown_on_page_disconnect: bool = True,
 ) -> FastAPI:
     page_disconnect_callback = shutdown_callback if shutdown_on_page_disconnect else lambda: None
@@ -111,10 +123,14 @@ def create_app(
         database.initialize()
         database.recover_interrupted()
         queue.start()
+        if page_collection_manager is not None:
+            page_collection_manager.start()
         try:
             yield
         finally:
             await page_sessions.close()
+            if page_collection_manager is not None:
+                page_collection_manager.stop()
             queue.stop()
 
     app = FastAPI(title="视频批量下载工具", version="0.2.0", lifespan=lifespan)
@@ -145,6 +161,30 @@ def create_app(
         preview = preview_links(request.text)
         if not preview.valid_urls:
             raise HTTPException(status_code=422, detail="没有识别到有效的公网 HTTP/HTTPS 链接")
+        if request.source_mode == "page":
+            if len(preview.valid_urls) != 1 or preview.invalid_count:
+                raise HTTPException(status_code=422, detail="页面批量下载每次只能导入一个页面链接")
+            if page_collection_manager is None:
+                raise HTTPException(status_code=503, detail="页面采集功能当前不可用")
+            try:
+                source_url = await resolve_short_link(preview.valid_urls[0])
+            except LinkResolutionError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            if is_douyin_search_url(source_url):
+                try:
+                    douyin_search_mode(source_url)
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+            configured = database.get_setting("download_directory")
+            output_dir = Path(request.output_dir or configured or default_download_dir).expanduser().resolve()
+            try:
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise HTTPException(status_code=422, detail=f"无法创建下载目录: {exc}") from exc
+            database.set_setting("download_directory", str(output_dir))
+            batch_id = database.create_page_batch(source_url, request.max_items, output_dir)
+            page_collection_manager.submit(batch_id)
+            return database.get_batch(batch_id)
         resolved_urls: list[str] = []
         original_urls: list[str] = []
         seen_urls: set[str] = set()
@@ -203,6 +243,8 @@ def create_app(
     async def delete_all_batches() -> dict:
         batch_ids = database.list_batch_ids()
         for batch_id in batch_ids:
+            if page_collection_manager is not None:
+                page_collection_manager.cancel_batch(batch_id)
             queue.cancel_batch(batch_id)
         deleted = sum(database.delete_batch(batch_id) for batch_id in batch_ids)
         return {"deleted": True, "count": deleted}
@@ -216,6 +258,8 @@ def create_app(
     @app.delete("/api/batches/{batch_id}")
     async def delete_batch(batch_id: int) -> dict:
         _batch_or_404(database, batch_id)
+        if page_collection_manager is not None:
+            page_collection_manager.cancel_batch(batch_id)
         queue.cancel_batch(batch_id)
         if not database.delete_batch(batch_id):
             raise HTTPException(status_code=404, detail="批次不存在")
@@ -250,6 +294,8 @@ def create_app(
     async def resume_batch(batch_id: int) -> dict:
         _batch_or_404(database, batch_id)
         queue.resume_batch(batch_id)
+        if page_collection_manager is not None:
+            page_collection_manager.resume_batch(batch_id)
         batch = database.get_batch(batch_id)
         batch["pause_reason"] = queue.pause_reason
         return batch
@@ -299,6 +345,6 @@ def create_app(
     else:
         @app.get("/", response_class=HTMLResponse)
         async def placeholder() -> str:
-            return "<h1>抖音批量下载工具</h1><p>前端资源尚未构建。</p>"
+            return "<h1>视频批量下载工具</h1><p>前端资源尚未构建。</p>"
 
     return app

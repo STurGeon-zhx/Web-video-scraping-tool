@@ -7,6 +7,9 @@ import { resetNewBatchState } from "./new-batch.js";
 
 const inputText = ref("");
 const inputElement = ref(null);
+const activeView = ref(window.location.hash === "#/pages" ? "pages" : "links");
+const pageUrl = ref("");
+const pageMaxItems = ref(50);
 const downloadDirectory = ref("");
 const preview = ref(null);
 const batch = ref(null);
@@ -26,6 +29,24 @@ const completedCount = computed(() => (counts.value.completed || 0) + (counts.va
 const overallProgress = computed(() => {
   if (!batch.value?.total) return 0;
   return Math.round((completedCount.value * 100) / batch.value.total);
+});
+const isPageView = computed(() => activeView.value === "pages");
+
+const collectionStatusText = computed(() => {
+  if (batch.value?.source_mode !== "page") return "";
+  const labels = {
+    pending: "等待开始采集",
+    waiting_login: "等待网页登录",
+    waiting_verification: "等待完成页面验证",
+    collecting: "正在采集",
+    target_reached: "已达到设定数量",
+    page_ended: "页面已结束",
+    login_expired: "登录状态已失效",
+    risk_controlled: "页面触发风控",
+    no_videos: "没有发现视频",
+    stopped: "采集已停止",
+  };
+  return labels[batch.value.collection_status] || batch.value.collection_status || "等待开始采集";
 });
 
 function platformLabel(platform) {
@@ -131,6 +152,46 @@ async function startBatch() {
   }
 }
 
+async function startPageBatch() {
+  if (!pageUrl.value.trim()) {
+    error.value = "请先粘贴一个包含视频的页面链接";
+    return;
+  }
+  busy.value = true;
+  error.value = "";
+  notice.value = "";
+  try {
+    const created = await request("/api/batches", {
+      method: "POST",
+      body: JSON.stringify({
+        text: pageUrl.value.trim(),
+        output_dir: downloadDirectory.value,
+        source_mode: "page",
+        max_items: Number(pageMaxItems.value),
+      }),
+    });
+    batch.value = created;
+    notice.value = `已创建页面采集批次，计划采集 ${created.requested_count} 条视频`;
+    connectEvents(created.id);
+    await loadHistory(1);
+  } catch (reason) {
+    error.value = reason.message;
+  } finally {
+    busy.value = false;
+  }
+}
+
+function navigateTo(view) {
+  activeView.value = view;
+  window.location.hash = view === "pages" ? "#/pages" : "#/links";
+  closeHistory();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function handleHashChange() {
+  activeView.value = window.location.hash === "#/pages" ? "pages" : "links";
+}
+
 function connectEvents(batchId) {
   eventSource?.close();
   eventSource = new EventSource(`/api/events?batchId=${batchId}`);
@@ -141,6 +202,8 @@ function connectEvents(batchId) {
     if (summary) {
       summary.counts = updated.counts;
       summary.total = updated.total;
+      summary.collected_count = updated.collected_count;
+      summary.collection_status = updated.collection_status;
     }
   });
   eventSource.onerror = () => {
@@ -177,6 +240,8 @@ async function newBatch() {
     error,
     closeCurrentEvents,
   });
+  pageUrl.value = "";
+  pageMaxItems.value = 50;
   await nextTick();
   window.scrollTo({ top: 0, behavior: "smooth" });
   inputElement.value?.focus();
@@ -186,6 +251,7 @@ async function viewBatch(batchId) {
   error.value = "";
   try {
     batch.value = await request(`/api/batches/${batchId}`);
+    navigateTo(batch.value.source_mode === "page" ? "pages" : "links");
     connectEvents(batchId);
     closeHistory();
   } catch (reason) {
@@ -272,8 +338,13 @@ async function openDirectory() {
 }
 
 onMounted(async () => {
+  if (!window.location.hash || !["#/links", "#/pages"].includes(window.location.hash)) {
+    window.location.hash = "#/links";
+  }
+  handleHashChange();
   pageSession = new EventSource("/api/app/session");
   window.addEventListener("keydown", handleKeydown);
+  window.addEventListener("hashchange", handleHashChange);
   try {
     await Promise.all([loadSettings(), loadHistory(1)]);
   } catch (reason) {
@@ -286,6 +357,7 @@ onBeforeUnmount(() => {
   pageSession?.close();
   pageSession = null;
   window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener("hashchange", handleHashChange);
   document.body.classList.remove("history-drawer-open");
 });
 </script>
@@ -302,6 +374,18 @@ onBeforeUnmount(() => {
       </div>
       <div class="topbar-actions">
         <span class="privacy-badge"><i></i> 数据仅保存在本机</span>
+        <button
+          v-if="!isPageView"
+          class="feature-nav-button page-download-nav"
+          type="button"
+          @click="navigateTo('pages')"
+        >页面批量下载</button>
+        <button
+          v-else
+          class="feature-nav-button links-download-nav"
+          type="button"
+          @click="navigateTo('links')"
+        >返回链接下载</button>
         <button class="history-trigger" type="button" @click="openHistory">
           历史批次 <strong>{{ history.total }}</strong>
         </button>
@@ -309,13 +393,13 @@ onBeforeUnmount(() => {
     </header>
 
     <main>
-      <section class="hero">
+      <section v-if="!isPageView" class="hero">
         <p class="eyebrow">简单三步</p>
         <h2>粘贴链接，剩下的交给队列</h2>
         <p>每行一条链接，也可以直接粘贴含文案的平台分享文本。</p>
       </section>
 
-      <section class="panel import-panel">
+      <section v-if="!isPageView" class="panel import-panel">
         <div class="panel-heading">
           <span class="step-number">1</span>
           <div>
@@ -357,6 +441,58 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
+      <section v-if="isPageView" class="hero page-hero">
+        <p class="eyebrow">页面视频采集</p>
+        <h2>页面内视频批量下载</h2>
+        <p>粘贴一个页面链接，设定数量后自动滚动采集并加入下载队列。</p>
+      </section>
+
+      <section v-if="isPageView" class="panel import-panel page-import-panel">
+        <div class="panel-heading">
+          <span class="step-number">1</span>
+          <div>
+            <h3>导入页面链接</h3>
+            <p>抖音搜索页会打开工具专用 Edge 窗口供你登录；其他公网页面会尽力识别公开媒体。</p>
+          </div>
+        </div>
+        <textarea
+          v-model="pageUrl"
+          aria-label="页面链接"
+          placeholder="https://www.douyin.com/search/美食&#10;https://example.com/videos"
+        ></textarea>
+
+        <div class="page-options">
+          <label class="count-field">
+            <span class="step-number">2</span>
+            <span class="count-copy">
+              <strong>下载数量</strong>
+              <small>按页面当前顺序采集，范围 1–500 条</small>
+            </span>
+            <input v-model.number="pageMaxItems" type="number" min="1" max="500" />
+          </label>
+        </div>
+
+        <div class="directory-row">
+          <span class="step-number">3</span>
+          <div class="directory-copy">
+            <strong>保存到</strong>
+            <span :title="downloadDirectory">{{ downloadDirectory || "正在读取默认目录…" }}</span>
+          </div>
+          <button class="secondary-button" type="button" @click="chooseDirectory">选择目录</button>
+        </div>
+
+        <div v-if="error" class="alert error-alert">{{ error }}</div>
+        <div v-if="notice" class="alert notice-alert">{{ notice }}</div>
+
+        <div class="start-row">
+          <div class="start-note">仅采集你有权下载的公开内容；不支持 DRM、私密或付费内容</div>
+          <button class="primary-button page-start-button" type="button" :disabled="busy" @click="startPageBatch">
+            <span class="step-number inverted">4</span>
+            {{ busy ? "正在创建采集任务…" : "开始采集并下载" }}
+          </button>
+        </div>
+      </section>
+
       <section v-if="batch" class="panel task-panel">
         <div class="task-header">
           <div>
@@ -370,6 +506,14 @@ onBeforeUnmount(() => {
             <button class="secondary-button" type="button" @click="retryFailed">重试失败项</button>
             <button class="secondary-button" type="button" @click="openDirectory">打开下载目录</button>
           </div>
+        </div>
+
+        <div v-if="batch.source_mode === 'page'" class="collection-status">
+          <div>
+            <strong>{{ collectionStatusText }}</strong>
+            <span>已采集 {{ batch.collected_count || 0 }} / {{ batch.requested_count || 0 }} 条</span>
+          </div>
+          <p v-if="batch.collection_stop_reason">{{ batch.collection_stop_reason }}</p>
         </div>
 
         <div class="metrics">
@@ -439,8 +583,9 @@ onBeforeUnmount(() => {
         <div v-else class="history-list">
           <article v-for="item in history.items" :key="item.id" class="history-item">
             <div class="history-copy">
-              <strong>批次 #{{ item.id }}</strong>
+              <strong><span class="history-type-badge">{{ item.source_mode === "page" ? "页面批次" : "链接批次" }}</span>批次 #{{ item.id }}</strong>
               <span>{{ formatCreatedAt(item.created_at) }} · 共 {{ item.total }} 项</span>
+              <span v-if="item.source_mode === 'page'">已采集 {{ item.collected_count || 0 }} / {{ item.requested_count || 0 }} 条</span>
               <span :title="item.output_dir">{{ item.output_dir }}</span>
             </div>
             <div class="history-counts">

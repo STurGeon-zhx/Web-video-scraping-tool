@@ -34,7 +34,7 @@ def test_default_download_directory_uses_windows_videos_folder(monkeypatch, tmp_
 
     result = default_download_directory()
 
-    assert result == tmp_path / "Videos" / "抖音批量下载"
+    assert result == tmp_path / "Videos" / "视频批量下载"
 
 
 def test_automation_can_override_data_directory_and_browser(monkeypatch, tmp_path: Path) -> None:

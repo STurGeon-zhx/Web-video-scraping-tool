@@ -74,7 +74,7 @@ def _open_directory(path: Path) -> None:
 def _configure_application(application: QApplication) -> None:
     QCoreApplication.setOrganizationName("DouyinBatchDownloader")
     QCoreApplication.setApplicationName(APP_TITLE)
-    QCoreApplication.setApplicationVersion("1.0.0")
+    QCoreApplication.setApplicationVersion("1.1.0")
     application.setQuitOnLastWindowClosed(True)
 
 

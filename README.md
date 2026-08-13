@@ -18,9 +18,7 @@
 
 ## 安装版使用
 
-> 本次多平台修改未重新生成安装包；已有安装版仍保持原有功能。多平台版本当前请按“开发运行”启动源码桌面程序。
-
-安装版支持 64 位 Windows 10/11。运行安装程序后，可从桌面或开始菜单打开“抖音批量下载工具”。程序使用独立桌面窗口，不会打开外部浏览器，也不要求目标电脑安装 Python、Node.js 或 FFmpeg。
+安装版支持 64 位 Windows 10/11。运行安装程序后，可从桌面或开始菜单打开“视频批量下载工具”。程序使用独立桌面窗口，不会打开外部浏览器，也不要求目标电脑安装 Python、Node.js 或 FFmpeg。
 
 页面、设置和历史批次均保存在当前电脑的 `%LOCALAPPDATA%\DouyinBatchDownloader`。查看界面和历史记录可离线完成；解析与下载公开抖音视频时需要联网。每台电脑只读取自己的本地数据。
 
@@ -52,11 +50,11 @@ npm --prefix frontend test
 powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1
 ```
 
-最终产物位于 `release\installer\抖音批量下载工具-Setup-1.0.0-Windows-x64.exe`。安装程序为当前用户安装，无需管理员权限；前端、Python 后端、QtWebEngine、yt-dlp、Playwright 驱动和 FFmpeg 都包含在安装包内。匿名 Cookie 回退使用 Windows 自带的 Edge，不读取用户现有浏览器 Cookie。
+最终产物位于 `release\installer\视频批量下载工具-Setup-1.1.0-Windows-x64.exe`。安装程序为当前用户安装，无需管理员权限；前端、Python 后端、QtWebEngine、yt-dlp、curl-cffi、Playwright 驱动和 FFmpeg 都包含在安装包内。匿名 Cookie 回退使用 Windows 自带的 Edge，不读取用户现有浏览器 Cookie。
 
 ## 使用
 
-1. 双击桌面或开始菜单中的“抖音批量下载工具”，等待独立窗口打开。
+1. 双击桌面或开始菜单中的“视频批量下载工具”，等待独立窗口打开。
 2. 粘贴公开视频链接，每行一条。
 3. 选择下载目录并点击“开始批量下载”。
 4. 页面可以安全刷新；关闭桌面窗口后，程序会自动退出。

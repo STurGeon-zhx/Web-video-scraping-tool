@@ -86,6 +86,12 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     output_dir TEXT NOT NULL,
                     paused INTEGER NOT NULL DEFAULT 0,
+                    source_mode TEXT NOT NULL DEFAULT 'links',
+                    source_url TEXT,
+                    requested_count INTEGER,
+                    collected_count INTEGER NOT NULL DEFAULT 0,
+                    collection_status TEXT,
+                    collection_stop_reason TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -129,6 +135,19 @@ class Database:
                 connection.execute(
                     "ALTER TABLE batches ADD COLUMN paused INTEGER NOT NULL DEFAULT 0"
                 )
+            batch_migrations = {
+                "source_mode": "TEXT NOT NULL DEFAULT 'links'",
+                "source_url": "TEXT",
+                "requested_count": "INTEGER",
+                "collected_count": "INTEGER NOT NULL DEFAULT 0",
+                "collection_status": "TEXT",
+                "collection_stop_reason": "TEXT",
+            }
+            for column, definition in batch_migrations.items():
+                if column not in batch_columns:
+                    connection.execute(
+                        f"ALTER TABLE batches ADD COLUMN {column} {definition}"
+                    )
             task_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(tasks)")
@@ -210,10 +229,92 @@ class Database:
             )
             return batch_id
 
+    def create_page_batch(
+        self,
+        source_url: str,
+        requested_count: int,
+        output_dir: Path,
+    ) -> int:
+        if not 1 <= requested_count <= 500:
+            raise ValueError("requested_count must be between 1 and 500")
+        now = self._now()
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO batches(
+                    output_dir, source_mode, source_url, requested_count,
+                    collected_count, collection_status, created_at
+                ) VALUES (?, 'page', ?, ?, 0, 'pending', ?)
+                """,
+                (str(output_dir), source_url, requested_count, now),
+            )
+            return int(cursor.lastrowid)
+
+    def append_page_video(self, batch_id: int, video: Any) -> bool:
+        now = self._now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            batch = connection.execute(
+                """
+                SELECT source_mode, requested_count, collected_count
+                FROM batches WHERE id = ?
+                """,
+                (batch_id,),
+            ).fetchone()
+            if batch is None:
+                connection.rollback()
+                raise KeyError(batch_id)
+            if batch["source_mode"] != "page":
+                connection.rollback()
+                raise ValueError("batch is not a page collection")
+            if int(batch["collected_count"]) >= int(batch["requested_count"]):
+                connection.rollback()
+                return False
+            duplicate = connection.execute(
+                """
+                SELECT 1 FROM tasks
+                WHERE batch_id = ? AND platform = ? AND video_id = ?
+                """,
+                (batch_id, video.platform, video.video_id),
+            ).fetchone()
+            if duplicate is not None:
+                connection.rollback()
+                return False
+            connection.execute(
+                """
+                INSERT INTO tasks(
+                    batch_id, original_url, canonical_url, platform, video_id,
+                    title, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch_id,
+                    video.original_url,
+                    video.canonical_url,
+                    video.platform,
+                    video.video_id,
+                    video.title or None,
+                    TaskStatus.QUEUED.value,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE batches SET collected_count = collected_count + 1 WHERE id = ?",
+                (batch_id,),
+            )
+            connection.commit()
+            return True
+
     def get_batch(self, batch_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             batch = connection.execute(
-                "SELECT id, output_dir, paused, created_at FROM batches WHERE id = ?",
+                """
+                SELECT id, output_dir, paused, source_mode, source_url,
+                    requested_count, collected_count, collection_status,
+                    collection_stop_reason, created_at
+                FROM batches WHERE id = ?
+                """,
                 (batch_id,),
             ).fetchone()
             if batch is None:
@@ -229,6 +330,12 @@ class Database:
             "id": int(batch["id"]),
             "output_dir": batch["output_dir"],
             "paused": bool(batch["paused"]),
+            "source_mode": str(batch["source_mode"]),
+            "source_url": batch["source_url"],
+            "requested_count": batch["requested_count"],
+            "collected_count": int(batch["collected_count"]),
+            "collection_status": batch["collection_status"],
+            "collection_stop_reason": batch["collection_stop_reason"],
             "created_at": batch["created_at"],
             "total": len(tasks),
             "counts": counts,
@@ -241,7 +348,9 @@ class Database:
             total = int(connection.execute("SELECT COUNT(*) FROM batches").fetchone()[0])
             batches = connection.execute(
                 """
-                SELECT id, output_dir, paused, created_at FROM batches
+                SELECT id, output_dir, paused, source_mode, source_url,
+                    requested_count, collected_count, collection_status,
+                    collection_stop_reason, created_at FROM batches
                 ORDER BY id DESC LIMIT ? OFFSET ?
                 """,
                 (page_size, offset),
@@ -261,6 +370,12 @@ class Database:
                         "id": int(batch["id"]),
                         "output_dir": str(batch["output_dir"]),
                         "paused": bool(batch["paused"]),
+                        "source_mode": str(batch["source_mode"]),
+                        "source_url": batch["source_url"],
+                        "requested_count": batch["requested_count"],
+                        "collected_count": int(batch["collected_count"]),
+                        "collection_status": batch["collection_status"],
+                        "collection_stop_reason": batch["collection_stop_reason"],
                         "created_at": str(batch["created_at"]),
                         "total": sum(counts.values()),
                         "counts": counts,
@@ -280,6 +395,36 @@ class Database:
                 "SELECT id FROM batches ORDER BY id DESC"
             ).fetchall()
         return [int(row["id"]) for row in rows]
+
+    def list_resumable_page_batches(self) -> list[int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id FROM batches
+                WHERE source_mode = 'page'
+                    AND collection_status IN ('pending', 'waiting_login', 'collecting')
+                ORDER BY id
+                """
+            ).fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def update_collection(
+        self,
+        batch_id: int,
+        status: str,
+        stop_reason: str | None = None,
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE batches
+                SET collection_status = ?, collection_stop_reason = ?
+                WHERE id = ? AND source_mode = 'page'
+                """,
+                (status, stop_reason, batch_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(batch_id)
 
     def delete_batch(self, batch_id: int) -> bool:
         with self._lock, self._connect() as connection:
