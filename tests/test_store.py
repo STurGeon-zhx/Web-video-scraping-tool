@@ -39,6 +39,25 @@ def test_claim_next_task_is_atomic_and_marks_it_resolving(tmp_path: Path) -> Non
     assert database.claim_next_task() is None
 
 
+def test_claimed_tasks_include_their_original_batch_position(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    batch_id = database.create_batch(
+        [
+            "https://www.douyin.com/video/1234567890123456781",
+            "https://www.douyin.com/video/1234567890123456782",
+        ],
+        tmp_path,
+    )
+
+    first = database.claim_next_task()
+    second = database.claim_next_task()
+
+    assert first is not None and first.batch_id == batch_id
+    assert second is not None and second.batch_id == batch_id
+    assert getattr(first, "position", None) == 1
+    assert getattr(second, "position", None) == 2
+
+
 def test_paused_batch_is_not_claimed_until_resumed(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     batch_id = database.create_batch(
@@ -295,6 +314,102 @@ def test_appends_unique_page_videos_in_discovery_order(tmp_path: Path) -> None:
     batch = database.get_batch(batch_id)
     assert batch["collected_count"] == 2
     assert [task["video_id"] for task in batch["tasks"]] == ["111", "222"]
+
+
+def test_page_video_is_inserted_as_skipped_before_workers_can_claim_it(
+    tmp_path: Path,
+) -> None:
+    database = make_database(tmp_path)
+    output = tmp_path / "already-downloaded.mp4"
+    output.write_bytes(b"video")
+    video = ExpandedVideo(
+        "douyin",
+        "111",
+        "existing title",
+        "https://www.douyin.com/video/111",
+        "https://www.douyin.com/search/food",
+    )
+    old_batch = database.create_expanded_batch([video], tmp_path)
+    old_task = database.claim_next_task()
+    assert old_task is not None and old_task.batch_id == old_batch
+    database.update_task(
+        old_task.id,
+        status=TaskStatus.COMPLETED,
+        title="downloaded title",
+        output_path=str(output),
+        progress=100,
+    )
+    page_batch = database.create_page_batch(
+        "https://www.douyin.com/search/food",
+        requested_count=2,
+        output_dir=tmp_path,
+    )
+
+    assert database.append_page_video(page_batch, video) is True
+
+    task = database.get_batch(page_batch)["tasks"][0]
+    assert task["status"] == TaskStatus.SKIPPED.value
+    assert task["title"] == "downloaded title"
+    assert task["output_path"] == str(output)
+    assert database.claim_next_task() is None
+
+
+def test_history_skip_never_overwrites_a_claimed_task(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    output = tmp_path / "already-downloaded.mp4"
+    video = ExpandedVideo(
+        "douyin",
+        "111",
+        "title",
+        "https://www.douyin.com/video/111",
+        "https://www.douyin.com/search/food",
+    )
+    old_batch = database.create_expanded_batch([video], tmp_path)
+    old_task = database.claim_next_task()
+    assert old_task is not None and old_task.batch_id == old_batch
+    database.update_task(
+        old_task.id,
+        status=TaskStatus.COMPLETED,
+        output_path=str(output),
+    )
+    new_batch = database.create_expanded_batch([video], tmp_path)
+    claimed = database.claim_next_task()
+    assert claimed is not None and claimed.batch_id == new_batch
+    output.write_bytes(b"video")
+
+    database.skip_existing_completed(new_batch)
+
+    task = database.get_batch(new_batch)["tasks"][0]
+    assert task["status"] == TaskStatus.RESOLVING.value
+
+
+def test_expanded_batch_marks_history_duplicates_before_commit(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    output = tmp_path / "already-downloaded.mp4"
+    output.write_bytes(b"video")
+    video = ExpandedVideo(
+        "douyin",
+        "111",
+        "title",
+        "https://www.douyin.com/video/111",
+        "https://www.douyin.com/video/111",
+    )
+    old_batch = database.create_expanded_batch([video], tmp_path)
+    old_task = database.claim_next_task()
+    assert old_task is not None and old_task.batch_id == old_batch
+    database.update_task(
+        old_task.id,
+        status=TaskStatus.COMPLETED,
+        output_path=str(output),
+        progress=100,
+    )
+
+    new_batch = database.create_expanded_batch([video], tmp_path)
+
+    task = database.get_batch(new_batch)["tasks"][0]
+    assert task["status"] == TaskStatus.SKIPPED.value
+    assert task["output_path"] == str(output)
+    assert database.claim_next_task() is None
 
 
 def test_page_batch_never_collects_more_than_requested_count(tmp_path: Path) -> None:

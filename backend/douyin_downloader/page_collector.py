@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import re
 import hashlib
+import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -180,7 +182,9 @@ def is_douyin_search_url(url: str) -> bool:
     hostname = (parsed.hostname or "").lower()
     return (
         (hostname == "douyin.com" or hostname.endswith(".douyin.com"))
-        and parsed.path.startswith(("/search/", "/root/search/"))
+        and parsed.path.startswith(
+            ("/search/", "/root/search/", "/jingxuan/search/")
+        )
     )
 
 
@@ -202,8 +206,19 @@ class BrowserSession(Protocol):
     def douyin_response_cards(self) -> list[dict[str, str]]: ...
     def generic_candidates(self) -> list[dict[str, str]]: ...
     def sync_cookies(self) -> None: ...
+    def persist_state(self) -> None: ...
     def reload(self) -> None: ...
+    def reopen(
+        self,
+        url: str,
+        *,
+        clean_state: bool,
+        software_rendering: bool,
+    ) -> None: ...
     def scroll(self) -> None: ...
+    def at_page_bottom(self) -> bool: ...
+    def page_exhausted(self) -> bool: ...
+    def loaded_saved_state(self) -> bool: ...
     def wait(self, milliseconds: int) -> None: ...
     def close(self) -> None: ...
 
@@ -216,7 +231,10 @@ class BrowserPageCollector:
         max_login_rounds: int = 600,
         initial_reload_rounds: int = 10,
         first_video_rounds: int = 30,
-        max_idle_rounds: int = 5,
+        max_idle_rounds: int | None = None,
+        idle_timeout_seconds: float = 30.0,
+        bottom_confirmations: int = 3,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._session_factory = session_factory
         self._wait_milliseconds = wait_milliseconds
@@ -224,6 +242,9 @@ class BrowserPageCollector:
         self._initial_reload_rounds = initial_reload_rounds
         self._first_video_rounds = first_video_rounds
         self._max_idle_rounds = max_idle_rounds
+        self._idle_timeout_seconds = idle_timeout_seconds
+        self._bottom_confirmations = bottom_confirmations
+        self._clock = clock
 
     def collect(
         self,
@@ -238,6 +259,24 @@ class BrowserPageCollector:
         search_mode = douyin_search_mode(source_url) if douyin_search else None
         discovered: set[tuple[str, str]] = set()
         idle_rounds = 0
+        bottom_idle_checks = 0
+        reported_end_checks = 0
+        last_progress_at = self._clock()
+        state_persisted = False
+        clean_recovery_attempted = False
+
+        def persist_login_state() -> None:
+            try:
+                persist_state = getattr(session, "persist_state", session.sync_cookies)
+                persist_state()
+            except Exception as exc:
+                logging.warning("保存页面采集登录状态失败: %s", exc)
+
+        def finish(outcome: CollectionOutcome) -> CollectionOutcome:
+            if discovered and outcome.status in {"target_reached", "page_ended"}:
+                persist_login_state()
+            on_status(outcome.status, outcome.reason)
+            return outcome
 
         def wait_for_verification() -> CollectionOutcome | None:
             on_status("waiting_verification", "请在验证页面中完成操作")
@@ -257,11 +296,11 @@ class BrowserPageCollector:
                 reloaded_initial_page = False
                 for round_index in range(self._max_login_rounds):
                     if control.is_cancelled():
-                        return CollectionOutcome("stopped", "采集已停止")
+                        return finish(CollectionOutcome("stopped", "采集已停止"))
                     if session.risk_controlled():
                         verification_outcome = wait_for_verification()
                         if verification_outcome is not None:
-                            return verification_outcome
+                            return finish(verification_outcome)
                         continue
                     login_required = session.login_required()
                     if login_required:
@@ -271,6 +310,46 @@ class BrowserPageCollector:
                     )
                     if has_video_cards or (saw_login_prompt and not login_required):
                         break
+                    loaded_saved_state = bool(
+                        getattr(session, "loaded_saved_state", lambda: False)()
+                    )
+                    if (
+                        not clean_recovery_attempted
+                        and loaded_saved_state
+                        and login_required
+                        and round_index + 1 >= self._first_video_rounds
+                    ):
+                        logging.info("已保存的登录状态已退出，切换干净会话")
+                        on_status(
+                            "waiting_login",
+                            "已保存的登录状态已失效，请重新登录或验证",
+                        )
+                        session.reopen(
+                            source_url,
+                            clean_state=True,
+                            software_rendering=False,
+                        )
+                        clean_recovery_attempted = True
+                        saw_login_prompt = False
+                        reloaded_initial_page = False
+                        continue
+                    if (
+                        not clean_recovery_attempted
+                        and not saw_login_prompt
+                        and not login_required
+                        and round_index + 1 >= self._first_video_rounds
+                    ):
+                        reopen = getattr(session, "reopen", None)
+                        if reopen is not None:
+                            on_status("waiting_login", "页面未返回视频，正在重新打开干净会话")
+                            reopen(
+                                source_url,
+                                clean_state=True,
+                                software_rendering=False,
+                            )
+                            clean_recovery_attempted = True
+                            reloaded_initial_page = False
+                            continue
                     if (
                         not reloaded_initial_page
                         and not saw_login_prompt
@@ -281,36 +360,38 @@ class BrowserPageCollector:
                         reloaded_initial_page = True
                     session.wait(self._wait_milliseconds)
                 else:
-                    return CollectionOutcome("login_expired", "等待网页登录超时")
-                session.sync_cookies()
+                    return finish(
+                        CollectionOutcome("login_expired", "等待网页登录超时")
+                    )
             on_status("collecting", None)
             while not control.is_cancelled():
                 control.wait_if_paused()
                 if control.is_cancelled():
-                    return CollectionOutcome("stopped", "采集已停止")
+                    return finish(CollectionOutcome("stopped", "采集已停止"))
                 if session.risk_controlled():
                     verification_outcome = wait_for_verification()
                     if verification_outcome is not None:
-                        return verification_outcome
+                        return finish(verification_outcome)
                     on_status("collecting", None)
                     continue
                 if douyin_search and session.login_required():
                     on_status("waiting_login", None)
                     for _ in range(self._max_login_rounds):
                         if control.is_cancelled():
-                            return CollectionOutcome("stopped", "采集已停止")
+                            return finish(CollectionOutcome("stopped", "采集已停止"))
                         if session.risk_controlled():
                             verification_outcome = wait_for_verification()
                             if verification_outcome is not None:
-                                return verification_outcome
+                                return finish(verification_outcome)
                             continue
                         if not session.login_required():
-                            session.sync_cookies()
                             on_status("collecting", None)
                             break
                         session.wait(self._wait_milliseconds)
                     else:
-                        return CollectionOutcome("login_expired", "等待网页登录超时")
+                        return finish(
+                            CollectionOutcome("login_expired", "等待网页登录超时")
+                        )
                     continue
                 if douyin_search:
                     cards = list(session.douyin_cards())
@@ -322,70 +403,191 @@ class BrowserPageCollector:
                         session.generic_candidates(), source_url
                     )
                 added = 0
+                newly_discovered = 0
                 for video in raw_videos:
                     key = (video.platform, video.video_id)
                     if key in discovered:
                         continue
                     discovered.add(key)
+                    newly_discovered += 1
+                    if not state_persisted:
+                        persist_login_state()
+                        state_persisted = True
                     if on_video(video):
                         added += 1
                     if len(discovered) >= max_items:
-                        return CollectionOutcome("target_reached", None)
-                idle_rounds = 0 if added else idle_rounds + 1
-                idle_limit = self._first_video_rounds if douyin_search and not discovered else self._max_idle_rounds
-                if idle_rounds >= idle_limit:
+                        return finish(CollectionOutcome("target_reached", None))
+                if newly_discovered:
+                    last_progress_at = self._clock()
+                    idle_rounds = 0
+                    bottom_idle_checks = 0
+                    reported_end_checks = 0
+                else:
+                    idle_rounds += 1
+
+                reported_exhausted = bool(
+                    getattr(session, "page_exhausted", lambda: False)()
+                )
+                if (
+                    not newly_discovered
+                    and reported_exhausted
+                    and bool(getattr(session, "at_page_bottom", lambda: True)())
+                ):
+                    reported_end_checks += 1
+                else:
+                    reported_end_checks = 0
+                exhausted = reported_end_checks >= self._bottom_confirmations
+                timed_out_at_bottom = False
+                if self._max_idle_rounds is not None:
+                    idle_limit = (
+                        self._first_video_rounds
+                        if douyin_search and not discovered
+                        else self._max_idle_rounds
+                    )
+                    timed_out_at_bottom = idle_rounds >= idle_limit
+                elif self._clock() - last_progress_at >= self._idle_timeout_seconds:
+                    if bool(getattr(session, "at_page_bottom", lambda: True)()):
+                        bottom_idle_checks += 1
+                    else:
+                        bottom_idle_checks = 0
+                    timed_out_at_bottom = bottom_idle_checks >= self._bottom_confirmations
+
+                if exhausted or timed_out_at_bottom:
+                    loaded_saved_state = bool(
+                        getattr(session, "loaded_saved_state", lambda: False)()
+                    )
+                    if (
+                        not discovered
+                        and loaded_saved_state
+                        and not clean_recovery_attempted
+                    ):
+                        logging.info("已保存的登录状态未返回视频，切换干净会话重试")
+                        on_status(
+                            "waiting_login",
+                            "已保存的登录状态已失效，请重新登录或验证",
+                        )
+                        session.reopen(
+                            source_url,
+                            clean_state=True,
+                            software_rendering=False,
+                        )
+                        clean_recovery_attempted = True
+                        idle_rounds = 0
+                        bottom_idle_checks = 0
+                        reported_end_checks = 0
+                        last_progress_at = self._clock()
+                        continue
                     if discovered:
-                        return CollectionOutcome("page_ended", "页面已结束或没有更多视频")
+                        return finish(
+                            CollectionOutcome("page_ended", "页面已结束或没有更多视频")
+                        )
                     reason = (
                         "综合页未发现视频，页面结构可能已变化"
                         if search_mode == "general"
                         else "页面中没有发现可下载视频"
                     )
-                    return CollectionOutcome("no_videos", reason)
+                    return finish(CollectionOutcome("no_videos", reason))
                 session.scroll()
                 session.wait(self._wait_milliseconds)
-            return CollectionOutcome("stopped", "采集已停止")
+            return finish(CollectionOutcome("stopped", "采集已停止"))
         finally:
             session.close()
 
 
 class PlaywrightBrowserSession:
-    def __init__(self, browser_data_dir: Path) -> None:
+    def __init__(
+        self,
+        browser_data_dir: Path,
+        playwright_factory: Callable[[], Any] | None = None,
+        *,
+        clean_state: bool = False,
+        software_rendering: bool = False,
+    ) -> None:
         self.browser_data_dir = Path(browser_data_dir)
-        self.profile_dir = self.browser_data_dir / "page-edge-profile"
+        self.storage_state_file = self.browser_data_dir / "page-login-state.json"
         self.cookie_file = self.browser_data_dir / "anonymous-cookies.txt"
+        self._playwright_factory = playwright_factory
+        self._clean_state = clean_state
+        self._software_rendering = software_rendering
         self._playwright = None
+        self._browser = None
         self._context = None
         self._page = None
         self._network_candidates: dict[str, dict[str, str]] = {}
         self._douyin_response_candidates: dict[str, dict[str, str]] = {}
+        self._page_exhausted = False
+        self._last_url: str | None = None
+        self._browser_retry_used = False
+        self._loaded_saved_state = False
 
     def open(self, url: str) -> None:
-        from playwright.sync_api import sync_playwright
+        self._last_url = url
+        if self._playwright_factory is None:
+            from playwright.sync_api import sync_playwright
 
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
-        self._playwright = sync_playwright().start()
-        self._context = self._playwright.chromium.launch_persistent_context(
-            str(self.profile_dir),
-            channel="msedge",
-            headless=False,
-        )
-        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+            starter = sync_playwright()
+        else:
+            starter = self._playwright_factory()
+        self.browser_data_dir.mkdir(parents=True, exist_ok=True)
+        self._playwright = starter.start()
+        launch_options: dict[str, Any] = {"headless": False}
+        if self._software_rendering:
+            launch_options["args"] = ["--disable-gpu"]
+        self._browser = self._playwright.chromium.launch(**launch_options)
+        context_options: dict[str, Any] = {}
+        if self.storage_state_file.is_file() and not self._clean_state:
+            context_options["storage_state"] = str(self.storage_state_file)
+        self._loaded_saved_state = "storage_state" in context_options
+        self._context = self._browser.new_context(**context_options)
+        self._page = self._context.new_page()
         self._page.on("response", self._capture_response)
-        self._page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        self._page.on("requestfinished", self._capture_finished_request)
+        try:
+            self._page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+        except Exception as exc:
+            if not self._recover_browser_close(exc):
+                raise
+
+    @staticmethod
+    def _is_browser_closed_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "target page, context or browser has been closed" in message
+
+    def _recover_browser_close(self, exc: Exception) -> bool:
+        if not self._is_browser_closed_error(exc):
+            return False
+        if self._browser_retry_used or self._last_url is None:
+            raise RuntimeError("验证浏览器意外退出，兼容模式重试失败") from exc
+        self._browser_retry_used = True
+        self.reopen(
+            self._last_url,
+            clean_state=False,
+            software_rendering=True,
+        )
+        return True
 
     def _capture_response(self, response) -> None:
         try:
             content_type = str(response.headers.get("content-type") or "").partition(";")[0].lower()
             url = str(response.url)
+            parsed = urlsplit(url)
             if (
-                urlsplit(url).path == "/aweme/v1/web/general/search/single/"
+                (parsed.hostname or "").lower().endswith("douyin.com")
+                and "search" in parsed.path
                 and "json" in content_type
             ):
-                for card in extract_douyin_response_cards(response.json()):
+                payload = response.json()
+                response_cards = extract_douyin_response_cards(payload)
+                for card in response_cards:
                     match = DOUYIN_VIDEO_PATTERN.search(card["href"])
                     if match is not None:
                         self._douyin_response_candidates.setdefault(match.group(1), card)
+                if (
+                    response_cards
+                    and isinstance(payload, Mapping)
+                    and payload.get("has_more") in (0, False)
+                ):
+                    self._page_exhausted = True
             if content_type.startswith("video/") or content_type in MANIFEST_CONTENT_TYPES:
                 self._network_candidates[url] = {
                     "url": url,
@@ -395,12 +597,21 @@ class PlaywrightBrowserSession:
         except Exception:
             return
 
+    def _capture_finished_request(self, request) -> None:
+        try:
+            response = request.response()
+            if response is not None:
+                self._capture_response(response)
+        except Exception:
+            return
+
     def _body_text(self) -> str:
         if self._page is None:
             return ""
         try:
             return self._page.locator("body").inner_text(timeout=2_000)
-        except Exception:
+        except Exception as exc:
+            self._recover_browser_close(exc)
             return ""
 
     def login_required(self) -> bool:
@@ -416,12 +627,119 @@ class PlaywrightBrowserSession:
             return []
         try:
             return list(
-                self._page.locator('a[href*="/video/"]').evaluate_all(
+                self._page.locator(
+                    'a[href*="/video/"], .search-result-card'
+                ).evaluate_all(
                     """
-                    elements => elements.map(element => ({
-                        href: element.href || element.getAttribute('href') || '',
-                        title: (element.innerText || element.getAttribute('aria-label') || '').trim()
-                    }))
+                    elements => {
+                        const findAwemeInfo = element => {
+                            const queue = [];
+                            const seen = new Set();
+                            const reactProperties = Object.getOwnPropertyNames(element);
+                            const fiberProperties = reactProperties.filter(
+                                name => name.startsWith('__reactFiber')
+                            );
+                            const roots = fiberProperties.length
+                                ? fiberProperties
+                                : reactProperties.filter(name => name.startsWith('__reactProps'));
+                            for (const name of roots) {
+                                queue.push([element[name], 0]);
+                            }
+                            let visited = 0;
+                            while (queue.length && visited < 500) {
+                                const [value, depth] = queue.pop();
+                                visited += 1;
+                                if (!value || typeof value !== 'object' || seen.has(value)) {
+                                    continue;
+                                }
+                                seen.add(value);
+                                const candidates = [
+                                    value.awemeInfo,
+                                    value.aweme_info,
+                                    value.data && (value.data.awemeInfo || value.data.aweme_info),
+                                    value.pendingProps && value.pendingProps.data && (
+                                        value.pendingProps.data.awemeInfo ||
+                                        value.pendingProps.data.aweme_info
+                                    ),
+                                    value.memoizedProps && value.memoizedProps.data && (
+                                        value.memoizedProps.data.awemeInfo ||
+                                        value.memoizedProps.data.aweme_info
+                                    )
+                                ];
+                                for (const info of candidates) {
+                                    if (!info || typeof info !== 'object') {
+                                        continue;
+                                    }
+                                    const hasContent = value => {
+                                        if (!value) {
+                                            return false;
+                                        }
+                                        if (Array.isArray(value)) {
+                                            return value.length > 0;
+                                        }
+                                        if (typeof value === 'object') {
+                                            return Object.keys(value).length > 0;
+                                        }
+                                        return true;
+                                    };
+                                    const videoId = String(info.awemeId || info.aweme_id || '');
+                                    const hasVideo = hasContent(info.video);
+                                    const hasImages = hasContent(
+                                        info.images || info.imagePostInfo || info.image_post_info
+                                    );
+                                    const isLive = hasContent(
+                                        info.isLive || info.is_live || info.liveRoom ||
+                                        info.live_room || info.roomId || info.room_id
+                                    );
+                                    const isAd = hasContent(
+                                        info.isAds || info.is_ads || info.isAd ||
+                                        info.is_ad || info.rawAdData || info.raw_ad_data
+                                    );
+                                    if (/^\\d+$/.test(videoId) && hasVideo && !hasImages && !isLive && !isAd) {
+                                        return info;
+                                    }
+                                }
+                                if (depth >= 12) {
+                                    continue;
+                                }
+                                for (const key of [
+                                    'sibling', 'memoizedProps', 'pendingProps', 'data', 'child'
+                                ]) {
+                                    let child;
+                                    try {
+                                        child = value[key];
+                                    } catch (_error) {
+                                        continue;
+                                    }
+                                    if (child && typeof child === 'object') {
+                                        queue.push([child, depth + 1]);
+                                    }
+                                }
+                            }
+                            return null;
+                        };
+
+                        return elements.map(element => {
+                            const directHref = element.href || element.getAttribute('href') || '';
+                            if (directHref.includes('/video/')) {
+                                return {
+                                    href: directHref,
+                                    title: (
+                                        element.innerText || element.getAttribute('aria-label') || ''
+                                    ).trim()
+                                };
+                            }
+                            const info = findAwemeInfo(element);
+                            if (!info) {
+                                return {href: '', title: ''};
+                            }
+                            const videoId = String(info.awemeId || info.aweme_id || '');
+                            return {
+                                href: `https://www.douyin.com/video/${videoId}`,
+                                title: String(info.desc || element.innerText || '').trim()
+                            };
+                        }).filter(card => card.href);
+                    }
                     """
                 )
             )
@@ -429,23 +747,50 @@ class PlaywrightBrowserSession:
             message = str(exc).lower()
             if "execution context was destroyed" in message and "navigation" in message:
                 return []
+            if self._recover_browser_close(exc):
+                return []
             raise
 
     def douyin_response_cards(self) -> list[dict[str, str]]:
         return list(self._douyin_response_candidates.values())
 
+    def page_exhausted(self) -> bool:
+        return self._page_exhausted
+
+    def loaded_saved_state(self) -> bool:
+        return self._loaded_saved_state
+
+    def at_page_bottom(self) -> bool:
+        if self._page is None:
+            return True
+        try:
+            return bool(
+                self._page.evaluate(
+                    "window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 8"
+                )
+            )
+        except Exception:
+            return False
+
     def generic_candidates(self) -> list[dict[str, str]]:
         if self._page is None:
             return list(self._network_candidates.values())
-        dom_candidates = self._page.locator("video[src], video source[src], a[href]").evaluate_all(
-            """
-            elements => elements.map(element => ({
-                url: element.currentSrc || element.src || element.href || '',
-                title: (element.title || element.getAttribute('aria-label') || document.title || '').trim(),
-                content_type: element.type || ''
-            }))
-            """
-        )
+        try:
+            dom_candidates = self._page.locator(
+                "video[src], video source[src], a[href]"
+            ).evaluate_all(
+                """
+                elements => elements.map(element => ({
+                    url: element.currentSrc || element.src || element.href || '',
+                    title: (element.title || element.getAttribute('aria-label') || document.title || '').trim(),
+                    content_type: element.type || ''
+                }))
+                """
+            )
+        except Exception as exc:
+            if self._recover_browser_close(exc):
+                return list(self._network_candidates.values())
+            raise
         return [*list(dom_candidates), *self._network_candidates.values()]
 
     def sync_cookies(self) -> None:
@@ -455,29 +800,80 @@ class PlaywrightBrowserSession:
         if cookies:
             write_netscape_cookie_file(cookies, self.cookie_file)
 
+    def persist_state(self) -> None:
+        if self._context is None:
+            return
+        temporary = self.storage_state_file.with_suffix(
+            self.storage_state_file.suffix + ".tmp"
+        )
+        try:
+            self._context.storage_state(path=str(temporary))
+            temporary.replace(self.storage_state_file)
+            self.sync_cookies()
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def reload(self) -> None:
         if self._page is not None:
-            self._page.reload(wait_until="domcontentloaded", timeout=60_000)
+            try:
+                self._page.reload(wait_until="domcontentloaded", timeout=60_000)
+            except Exception as exc:
+                if not self._recover_browser_close(exc):
+                    raise
+
+    def reopen(
+        self,
+        url: str,
+        *,
+        clean_state: bool,
+        software_rendering: bool,
+    ) -> None:
+        self.close()
+        self._clean_state = clean_state
+        self._software_rendering = software_rendering
+        self._network_candidates.clear()
+        self._douyin_response_candidates.clear()
+        self._page_exhausted = False
+        self.open(url)
 
     def scroll(self) -> None:
         if self._page is not None:
-            self._page.evaluate("window.scrollBy(0, Math.max(window.innerHeight * 0.85, 600))")
+            try:
+                self._page.evaluate(
+                    "window.scrollBy(0, Math.max(window.innerHeight * 0.85, 600))"
+                )
+            except Exception as exc:
+                if not self._recover_browser_close(exc):
+                    raise
 
     def wait(self, milliseconds: int) -> None:
         if self._page is not None:
-            self._page.wait_for_timeout(milliseconds)
+            try:
+                self._page.wait_for_timeout(milliseconds)
+            except Exception as exc:
+                if not self._recover_browser_close(exc):
+                    raise
 
     def close(self) -> None:
-        try:
-            if self._context is not None:
-                self.sync_cookies()
-                self._context.close()
-        finally:
-            if self._playwright is not None:
+        for resource_name, resource in (
+            ("browser context", self._context),
+            ("browser", self._browser),
+        ):
+            if resource is None:
+                continue
+            try:
+                resource.close()
+            except Exception as exc:
+                logging.warning("关闭页面采集%s失败: %s", resource_name, exc)
+        if self._playwright is not None:
+            try:
                 self._playwright.stop()
-            self._page = None
-            self._context = None
-            self._playwright = None
+            except Exception as exc:
+                logging.warning("停止页面采集 Playwright 失败: %s", exc)
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._playwright = None
 
 
 class PageCollectionManager:
@@ -492,41 +888,47 @@ class PageCollectionManager:
         self.collector_factory = collector_factory
         self._application_stop = threading.Event()
         self._lock = threading.Lock()
-        self._collection_lock = threading.Lock()
-        self._threads: dict[int, threading.Thread] = {}
+        self._condition = threading.Condition(self._lock)
+        self._pending: deque[int] = deque()
+        self._pending_ids: set[int] = set()
+        self._worker_thread: threading.Thread | None = None
+        self._current_batch_id: int | None = None
         self._cancel_events: dict[int, threading.Event] = {}
 
     def start(self) -> None:
         self._application_stop.clear()
+        with self._condition:
+            self._ensure_worker_locked()
         for batch_id in self.database.list_resumable_page_batches():
             self.submit(batch_id)
 
     def stop(self, timeout: float = 10.0) -> None:
         self._application_stop.set()
-        with self._lock:
-            threads = list(self._threads.values())
-            events = list(self._cancel_events.values())
-        for event in events:
-            event.set()
-        deadline = time.monotonic() + timeout
-        for thread in threads:
-            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        with self._condition:
+            for event in self._cancel_events.values():
+                event.set()
+            worker = self._worker_thread
+            self._condition.notify_all()
+        if worker is not None:
+            worker.join(timeout=timeout)
+        with self._condition:
+            if worker is not None and self._worker_thread is worker and not worker.is_alive():
+                self._worker_thread = None
+            self._pending.clear()
+            self._pending_ids.clear()
+            self._cancel_events.clear()
+            self._current_batch_id = None
 
     def submit(self, batch_id: int) -> None:
-        with self._lock:
-            running = self._threads.get(batch_id)
-            if running is not None and running.is_alive():
+        with self._condition:
+            if batch_id == self._current_batch_id or batch_id in self._pending_ids:
                 return
             cancel_event = threading.Event()
-            thread = threading.Thread(
-                target=self._run_batch,
-                args=(batch_id, cancel_event),
-                name=f"page-collector-{batch_id}",
-                daemon=True,
-            )
             self._cancel_events[batch_id] = cancel_event
-            self._threads[batch_id] = thread
-            thread.start()
+            self._pending.append(batch_id)
+            self._pending_ids.add(batch_id)
+            self._ensure_worker_locked()
+            self._condition.notify()
 
     def cancel_batch(self, batch_id: int) -> None:
         with self._lock:
@@ -546,6 +948,37 @@ class PageCollectionManager:
         }:
             self.submit(batch_id)
 
+    def _ensure_worker_locked(self) -> None:
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            return
+        self._worker_thread = threading.Thread(
+            target=self._worker_loop,
+            name="page-collector-worker",
+            daemon=True,
+        )
+        self._worker_thread.start()
+
+    def _worker_loop(self) -> None:
+        while True:
+            with self._condition:
+                while not self._pending and not self._application_stop.is_set():
+                    self._condition.wait()
+                if self._application_stop.is_set():
+                    return
+                batch_id = self._pending.popleft()
+                self._pending_ids.discard(batch_id)
+                self._current_batch_id = batch_id
+                cancel_event = self._cancel_events[batch_id]
+            try:
+                if not cancel_event.is_set():
+                    self._run_batch(batch_id, cancel_event)
+            finally:
+                with self._condition:
+                    self._cancel_events.pop(batch_id, None)
+                    if self._current_batch_id == batch_id:
+                        self._current_batch_id = None
+                    self._condition.notify_all()
+
     def _run_batch(self, batch_id: int, cancel_event: threading.Event) -> None:
         try:
             batch = self.database.get_batch(batch_id)
@@ -563,18 +996,16 @@ class PageCollectionManager:
             def on_video(video: ExpandedVideo) -> bool:
                 inserted = self.database.append_page_video(batch_id, video)
                 if inserted:
-                    self.database.skip_existing_completed(batch_id)
                     self.queue.wake()
                 return inserted
 
-            with self._collection_lock:
-                outcome = collector.collect(
-                    str(batch["source_url"]),
-                    int(batch["requested_count"]),
-                    on_video,
-                    on_status,
-                    control,
-                )
+            outcome = collector.collect(
+                str(batch["source_url"]),
+                int(batch["requested_count"]),
+                on_video,
+                on_status,
+                control,
+            )
             if self._application_stop.is_set():
                 self.database.update_collection(batch_id, "pending", None)
             elif not cancel_event.is_set():
@@ -586,7 +1017,3 @@ class PageCollectionManager:
                 self.database.update_collection(batch_id, "stopped", str(exc))
             except KeyError:
                 pass
-        finally:
-            with self._lock:
-                self._threads.pop(batch_id, None)
-                self._cancel_events.pop(batch_id, None)

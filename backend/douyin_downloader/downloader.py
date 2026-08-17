@@ -215,6 +215,7 @@ class YtDlpDownloader:
             "no_warnings": True,
             "noplaylist": True,
             "continuedl": True,
+            "socket_timeout": 30,
             "retries": 3,
             "fragment_retries": 3,
             "concurrent_fragment_downloads": 2,
@@ -283,9 +284,12 @@ class YtDlpDownloader:
                 "direct": "视频直链",
                 "vipshop": "唯品会视频",
             }.get(task.platform, "视频")
+            output_title = title or f"{platform_prefix}_{video_id}"
+            if task.position > 0:
+                output_title = f"{task.position:03d}_{output_title}"
             destination = build_unique_output_path(
                 task.output_dir,
-                title or f"{platform_prefix}_{video_id}",
+                output_title,
                 "mp4",
             )
             shutil.move(str(source), str(destination))

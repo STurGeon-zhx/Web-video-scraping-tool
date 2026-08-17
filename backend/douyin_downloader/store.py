@@ -45,6 +45,7 @@ class TaskRecord:
     output_dir: Path
     attempts: int
     platform: str = "douyin"
+    position: int = 0
 
 
 class Database:
@@ -205,27 +206,63 @@ class Database:
                 (str(output_dir), now),
             )
             batch_id = int(cursor.lastrowid)
-            connection.executemany(
-                """
-                INSERT INTO tasks(
-                    batch_id, original_url, canonical_url, platform, video_id,
-                    title, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
+            rows = []
+            for video in videos:
+                previous = connection.execute(
+                    """
+                    SELECT title, output_path FROM tasks
+                    WHERE platform = ? AND video_id = ? AND status = ?
+                        AND output_path IS NOT NULL
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (
+                        video.platform,
+                        video.video_id,
+                        TaskStatus.COMPLETED.value,
+                    ),
+                ).fetchone()
+                existing_file = (
+                    previous
+                    if previous is not None and Path(previous["output_path"]).is_file()
+                    else None
+                )
+                rows.append(
                     (
                         batch_id,
                         video.original_url,
                         video.canonical_url,
                         video.platform,
                         video.video_id,
-                        video.title or None,
-                        TaskStatus.QUEUED.value,
+                        (
+                            existing_file["title"]
+                            if existing_file is not None
+                            else (video.title or None)
+                        ),
+                        (
+                            TaskStatus.SKIPPED.value
+                            if existing_file is not None
+                            else TaskStatus.QUEUED.value
+                        ),
+                        100 if existing_file is not None else 0,
+                        (
+                            existing_file["output_path"]
+                            if existing_file is not None
+                            else None
+                        ),
+                        "历史记录中已下载" if existing_file is not None else None,
                         now,
                         now,
                     )
-                    for video in videos
-                ],
+                )
+            connection.executemany(
+                """
+                INSERT INTO tasks(
+                    batch_id, original_url, canonical_url, platform, video_id,
+                    title, status, progress, output_path, error_message,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
             )
             return batch_id
 
@@ -280,12 +317,47 @@ class Database:
             if duplicate is not None:
                 connection.rollback()
                 return False
+            previous = connection.execute(
+                """
+                SELECT title, output_path FROM tasks
+                WHERE batch_id != ? AND platform = ? AND video_id = ? AND status = ?
+                    AND output_path IS NOT NULL
+                ORDER BY id DESC LIMIT 1
+                """,
+                (
+                    batch_id,
+                    video.platform,
+                    video.video_id,
+                    TaskStatus.COMPLETED.value,
+                ),
+            ).fetchone()
+            existing_file = (
+                previous
+                if previous is not None and Path(previous["output_path"]).is_file()
+                else None
+            )
+            initial_status = (
+                TaskStatus.SKIPPED.value
+                if existing_file is not None
+                else TaskStatus.QUEUED.value
+            )
+            initial_title = (
+                existing_file["title"]
+                if existing_file is not None
+                else (video.title or None)
+            )
+            initial_output = (
+                existing_file["output_path"] if existing_file is not None else None
+            )
+            initial_progress = 100 if existing_file is not None else 0
+            initial_message = "历史记录中已下载" if existing_file is not None else None
             connection.execute(
                 """
                 INSERT INTO tasks(
                     batch_id, original_url, canonical_url, platform, video_id,
-                    title, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    title, status, progress, output_path, error_message,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch_id,
@@ -293,8 +365,11 @@ class Database:
                     video.canonical_url,
                     video.platform,
                     video.video_id,
-                    video.title or None,
-                    TaskStatus.QUEUED.value,
+                    initial_title,
+                    initial_status,
+                    initial_progress,
+                    initial_output,
+                    initial_message,
                     now,
                     now,
                 ),
@@ -445,7 +520,12 @@ class Database:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT tasks.*, batches.output_dir
+                SELECT tasks.*, batches.output_dir,
+                    (
+                        SELECT COUNT(*) FROM tasks AS ordered_tasks
+                        WHERE ordered_tasks.batch_id = tasks.batch_id
+                            AND ordered_tasks.id <= tasks.id
+                    ) AS batch_position
                 FROM tasks JOIN batches ON batches.id = tasks.batch_id
                 WHERE tasks.status = ? AND batches.paused = 0
                 ORDER BY tasks.id LIMIT 1
@@ -479,6 +559,7 @@ class Database:
                 output_dir=Path(row["output_dir"]),
                 attempts=int(row["attempts"]),
                 platform=str(row["platform"]),
+                position=int(row["batch_position"]),
             )
 
     def update_task(self, task_id: int, **fields: Any) -> None:
@@ -537,8 +618,11 @@ class Database:
     def skip_existing_completed(self, batch_id: int) -> int:
         with self._lock, self._connect() as connection:
             new_tasks = connection.execute(
-                "SELECT id, platform, video_id FROM tasks WHERE batch_id = ? AND video_id IS NOT NULL",
-                (batch_id,),
+                """
+                SELECT id, platform, video_id FROM tasks
+                WHERE batch_id = ? AND video_id IS NOT NULL AND status = ?
+                """,
+                (batch_id, TaskStatus.QUEUED.value),
             ).fetchall()
             skipped = 0
             for task in new_tasks:
@@ -558,10 +642,10 @@ class Database:
                 ).fetchone()
                 if previous is None or not Path(previous["output_path"]).is_file():
                     continue
-                connection.execute(
+                changed = connection.execute(
                     """
                     UPDATE tasks SET status = ?, progress = 100, title = ?, output_path = ?,
-                        error_message = ?, updated_at = ? WHERE id = ?
+                        error_message = ?, updated_at = ? WHERE id = ? AND status = ?
                     """,
                     (
                         TaskStatus.SKIPPED.value,
@@ -570,9 +654,11 @@ class Database:
                         "历史记录中已下载",
                         self._now(),
                         task["id"],
+                        TaskStatus.QUEUED.value,
                     ),
-                )
-                skipped += 1
+                ).rowcount
+                if changed == 1:
+                    skipped += 1
             return skipped
 
     def get_setting(self, key: str) -> str | None:

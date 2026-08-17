@@ -131,6 +131,35 @@ def test_unexpected_task_preparation_error_fails_only_that_task_and_queue_contin
     assert downloader.calls == 1
 
 
+def test_worker_survives_base_exception_and_processes_remaining_tasks(tmp_path: Path) -> None:
+    database, batch_id = make_database(tmp_path, 2)
+
+    class FatalOnceDownloader:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def download(self, task, on_progress):
+            self.calls += 1
+            if self.calls == 1:
+                raise SystemExit("simulated worker termination")
+            output = tmp_path / f"{task.id}.mp4"
+            output.write_bytes(b"video")
+            return DownloadResult(task.video_id or "unknown", "completed", output)
+
+    downloader = FatalOnceDownloader()
+    queue = TaskQueue(database, downloader, worker_count=1, retry_delays=(0, 0))
+    queue.start()
+    try:
+        wait_until(
+            lambda: database.get_batch(batch_id)["counts"]
+            == {"failed": 1, "completed": 1}
+        )
+    finally:
+        queue.stop()
+
+    assert downloader.calls == 2
+
+
 def test_cancel_active_batch_removes_only_its_partial_files(tmp_path: Path) -> None:
     database, batch_id = make_database(tmp_path, 1)
     started = threading.Event()

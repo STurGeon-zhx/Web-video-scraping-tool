@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import logging
 import threading
 import time
 from pathlib import Path
@@ -139,14 +140,18 @@ class TaskQueue:
                     continue
                 self.pause_reason = None
                 self._process_task(task)
-            except Exception as exc:
+            except BaseException as exc:
                 if task is not None:
-                    self.database.update_task(
-                        task.id,
-                        status=TaskStatus.FAILED,
-                        error_code=ErrorCode.UNKNOWN.value,
-                        error_message=f"{ERROR_MESSAGES[ErrorCode.UNKNOWN]}: {exc}",
-                    )
+                    try:
+                        self.database.update_task(
+                            task.id,
+                            status=TaskStatus.FAILED,
+                            error_code=ErrorCode.UNKNOWN.value,
+                            error_message=f"{ERROR_MESSAGES[ErrorCode.UNKNOWN]}: {exc}",
+                        )
+                    except Exception:
+                        logging.exception("工作器无法记录任务 %s 的异常状态", task.id)
+                logging.exception("下载工作器捕获到未处理异常")
 
     def _has_disk_space(self, directory: Path) -> bool:
         directory.mkdir(parents=True, exist_ok=True)

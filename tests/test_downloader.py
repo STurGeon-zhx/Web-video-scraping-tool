@@ -1,6 +1,7 @@
 from pathlib import Path
 import threading
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -107,6 +108,26 @@ def test_download_reports_progress_and_moves_to_safe_title(tmp_path: Path) -> No
     assert result.output_path.read_bytes() == b"video"
 
 
+def test_download_prefixes_batch_position_to_preserve_file_order(tmp_path: Path) -> None:
+    base_task = make_task(tmp_path)
+    ordered_task = SimpleNamespace(
+        **{
+            name: getattr(base_task, name)
+            for name in TaskRecord.__slots__
+            if name != "position"
+        },
+        position=3,
+    )
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: FakeYoutubeDL(options),
+        ffmpeg_location=None,
+    )
+
+    result = downloader.download(ordered_task, lambda _event: None)
+
+    assert result.output_path.name == "003_测试_标题.mp4"
+
+
 def test_download_prefers_h264_aac_but_keeps_best_format_fallback(tmp_path: Path) -> None:
     captured: dict = {}
 
@@ -122,6 +143,21 @@ def test_download_prefers_h264_aac_but_keeps_best_format_fallback(tmp_path: Path
     selector = captured["format"]
     assert selector.index("bestvideo[vcodec^=avc1]") < selector.index("bestvideo*+bestaudio/best")
     assert selector.index("bestaudio[acodec=mp4a.40.2]") < selector.index("bestvideo*+bestaudio/best")
+
+
+def test_download_sets_a_bounded_network_socket_timeout(tmp_path: Path) -> None:
+    captured: dict = {}
+
+    def factory(options: dict):
+        captured.update(options)
+        return FakeYoutubeDL(options)
+
+    YtDlpDownloader(ydl_factory=factory).download(
+        make_task(tmp_path),
+        lambda _event: None,
+    )
+
+    assert captured["socket_timeout"] == 30
 
 
 def test_download_uses_compatible_mp4_returned_by_media_processor(tmp_path: Path) -> None:

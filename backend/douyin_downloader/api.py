@@ -217,7 +217,6 @@ def create_app(
             raise HTTPException(status_code=422, detail=f"无法创建下载目录: {exc}") from exc
         database.set_setting("download_directory", str(output_dir))
         batch_id = database.create_expanded_batch(expansion.videos, output_dir)
-        database.skip_existing_completed(batch_id)
         queue.wake()
         payload = database.get_batch(batch_id)
         payload["import_summary"] = {
