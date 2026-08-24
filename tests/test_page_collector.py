@@ -1307,7 +1307,7 @@ def test_playwright_session_uses_fresh_context_with_saved_login_state(tmp_path: 
 
     session.open("https://www.douyin.com/search/food?type=video")
 
-    assert chromium.launch_kwargs == {"headless": False}
+    assert chromium.launch_kwargs == {"headless": False, "channel": "msedge"}
     assert browser.new_context_kwargs == {"storage_state": str(storage_state)}
     assert page.goto_calls == ["https://www.douyin.com/search/food?type=video"]
 

@@ -530,7 +530,7 @@ class PlaywrightBrowserSession:
             starter = self._playwright_factory()
         self.browser_data_dir.mkdir(parents=True, exist_ok=True)
         self._playwright = starter.start()
-        launch_options: dict[str, Any] = {"headless": False}
+        launch_options: dict[str, Any] = {"headless": False, "channel": "msedge"}
         if self._software_rendering:
             launch_options["args"] = ["--disable-gpu"]
         self._browser = self._playwright.chromium.launch(**launch_options)
