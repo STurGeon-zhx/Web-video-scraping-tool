@@ -108,6 +108,73 @@ def test_download_reports_progress_and_moves_to_safe_title(tmp_path: Path) -> No
     assert result.output_path.read_bytes() == b"video"
 
 
+def test_youtube_download_uses_live_network_options_only_for_youtube(tmp_path: Path) -> None:
+    captured: list[dict] = []
+
+    def factory(options: dict):
+        captured.append(options)
+        return FakeYoutubeDL(options)
+
+    downloader = YtDlpDownloader(
+        ydl_factory=factory,
+        youtube_runtime_options_provider=lambda: {"js_runtimes": {"deno": {}}},
+        youtube_network_options_provider=lambda: {"proxy": "http://127.0.0.1:7890"},
+        youtube_auth_options_provider=lambda: {"cookiefile": "C:/tool-data/youtube-cookies.txt"},
+    )
+    youtube_task = replace(
+        make_task(tmp_path / "youtube"),
+        platform="youtube",
+        canonical_url="https://www.youtube.com/watch?v=BaW_jenozKc",
+    )
+    downloader.download(youtube_task, lambda _event: None)
+
+    douyin_task = replace(make_task(tmp_path / "douyin"), id=2)
+    downloader.download(douyin_task, lambda _event: None)
+
+    assert captured[0]["proxy"] == "http://127.0.0.1:7890"
+    assert captured[0]["cookiefile"] == "C:/tool-data/youtube-cookies.txt"
+    assert "proxy" not in captured[1]
+    assert "cookiefile" not in captured[1]
+
+
+def test_manual_youtube_proxy_connection_failure_has_distinct_error(tmp_path: Path) -> None:
+    class FailingYoutubeDL(FakeYoutubeDL):
+        def extract_info(self, url: str, download: bool) -> dict:
+            raise RuntimeError("connection refused")
+
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: FailingYoutubeDL(options),
+        youtube_runtime_options_provider=lambda: {},
+        youtube_network_options_provider=lambda: {"proxy": "http://127.0.0.1:7890"},
+    )
+    task = replace(make_task(tmp_path), platform="youtube")
+
+    with pytest.raises(DownloadError) as caught:
+        downloader.download(task, lambda _event: None)
+
+    assert caught.value.code == ErrorCode.PROXY_UNAVAILABLE
+    assert caught.value.user_message == "YouTube 本地代理不可用，请检查代理软件、地址和端口"
+
+
+def test_youtube_bot_verification_has_specific_user_message(tmp_path: Path) -> None:
+    class BotVerificationYoutubeDL(FakeYoutubeDL):
+        def extract_info(self, url: str, download: bool) -> dict:
+            raise RuntimeError("Sign in to confirm you're not a bot")
+
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: BotVerificationYoutubeDL(options),
+        youtube_runtime_options_provider=lambda: {},
+        youtube_network_options_provider=lambda: {"proxy": "http://127.0.0.1:7890"},
+    )
+    task = replace(make_task(tmp_path), platform="youtube")
+
+    with pytest.raises(DownloadError) as caught:
+        downloader.download(task, lambda _event: None)
+
+    assert caught.value.code == ErrorCode.ACCESS_RESTRICTED
+    assert "登录确认非机器人" in caught.value.user_message
+
+
 def test_download_prefixes_batch_position_to_preserve_file_order(tmp_path: Path) -> None:
     base_task = make_task(tmp_path)
     ordered_task = SimpleNamespace(
@@ -158,6 +225,51 @@ def test_download_sets_a_bounded_network_socket_timeout(tmp_path: Path) -> None:
     )
 
     assert captured["socket_timeout"] == 30
+
+
+def test_youtube_uses_pinned_deno_options_and_never_uses_cookie_file(tmp_path: Path) -> None:
+    cookie_file = tmp_path / "anonymous-cookies.txt"
+    cookie_file.write_text("cookie", encoding="utf-8")
+    captured: dict = {}
+
+    def factory(options: dict):
+        captured.update(options)
+        return FakeYoutubeDL(options)
+
+    task = replace(
+        make_task(tmp_path),
+        platform="youtube",
+        canonical_url="https://www.youtube.com/watch?v=BaW_jenozKc",
+        video_id="BaW_jenozKc",
+    )
+    YtDlpDownloader(
+        ydl_factory=factory,
+        cookie_file=cookie_file,
+        youtube_runtime_options_provider=lambda: {
+            "js_runtimes": {"deno": {"path": "C:/runtime/deno.exe"}},
+            "remote_components": set(),
+        },
+    ).download(task, lambda _event: None)
+
+    assert captured["js_runtimes"]["deno"]["path"] == "C:/runtime/deno.exe"
+    assert captured["remote_components"] == set()
+    assert "cookiefile" not in captured
+
+
+def test_missing_youtube_runtime_returns_actionable_error(tmp_path: Path) -> None:
+    task = replace(make_task(tmp_path), platform="youtube")
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: FakeYoutubeDL(options),
+        youtube_runtime_options_provider=lambda: (_ for _ in ()).throw(
+            RuntimeError("missing deno")
+        ),
+    )
+
+    with pytest.raises(DownloadError) as caught:
+        downloader.download(task, lambda _event: None)
+
+    assert caught.value.code == ErrorCode.YOUTUBE_RUNTIME
+    assert "setup-youtube-runtime.ps1" in caught.value.user_message
 
 
 def test_download_uses_compatible_mp4_returned_by_media_processor(tmp_path: Path) -> None:
@@ -212,6 +324,8 @@ def test_any_media_processing_failure_has_specific_user_facing_error(tmp_path: P
         ("Connection timed out", ErrorCode.NETWORK),
         ("快手匿名访问失败: captcha", ErrorCode.KUAISHOU_ACCESS),
         ("唯品会匿名访问失败，请稍后重试", ErrorCode.VIPSHOP_ACCESS),
+        ("Sign in to confirm you are not a bot", ErrorCode.ACCESS_RESTRICTED),
+        ("This format requires a PO Token", ErrorCode.ACCESS_RESTRICTED),
         ("该链接没有匹配到受支持的平台专用解析器", ErrorCode.UNSUPPORTED_PLATFORM),
         ("unexpected extractor response", ErrorCode.UNKNOWN),
     ],

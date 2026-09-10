@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -49,7 +50,11 @@ class StubExpander:
         videos = []
         for url, original in zip(urls, originals, strict=True):
             video_id = url.rstrip("/").rsplit("/", 1)[-1]
-            platform = "bilibili" if "bilibili.com" in url else "douyin"
+            if "youtube.com" in url:
+                platform = "youtube"
+                video_id = (parse_qs(urlsplit(url).query).get("v") or [video_id])[0]
+            else:
+                platform = "bilibili" if "bilibili.com" in url else "douyin"
             videos.append(ExpandedVideo(platform, video_id, "", url, original))
         return ExpansionResult(videos, len(urls), 0, {videos[0].platform: len(videos)})
 
@@ -319,6 +324,82 @@ def test_page_batch_rejects_unsupported_douyin_search_tab(tmp_path: Path) -> Non
     assert page_manager.submitted == []
 
 
+def test_youtube_watch_with_playlist_parameter_remains_single_video(tmp_path: Path) -> None:
+    client, _, _ = make_client(tmp_path)
+
+    response = client.post(
+        "/api/batches",
+        json={"text": "https://www.youtube.com/watch?v=BaW_jenozKc&list=PL123&t=2"},
+    )
+
+    assert response.status_code == 201
+    task = response.json()["tasks"][0]
+    assert task["platform"] == "youtube"
+    assert task["video_id"] == "BaW_jenozKc"
+    assert task["canonical_url"] == "https://www.youtube.com/watch?v=BaW_jenozKc"
+
+
+def test_youtube_page_batch_normalizes_channel_root(tmp_path: Path) -> None:
+    database = Database(tmp_path / "youtube-page.db")
+    database.initialize()
+    page_manager = StubPageManager()
+    app = create_app(
+        database,
+        IdleQueue(database),
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        short_link_resolver=identity_resolver,
+        page_collection_manager=page_manager,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/batches",
+        json={"text": "https://youtube.com/@example", "source_mode": "page", "max_items": 5},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["source_url"] == "https://www.youtube.com/@example/videos"
+
+
+def test_youtube_page_and_single_urls_are_rejected_in_wrong_modes(tmp_path: Path) -> None:
+    database = Database(tmp_path / "youtube-modes.db")
+    database.initialize()
+    page_manager = StubPageManager()
+    app = create_app(
+        database,
+        IdleQueue(database),
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        short_link_resolver=identity_resolver,
+        batch_expander=StubExpander(),
+        page_collection_manager=page_manager,
+    )
+    client = TestClient(app)
+
+    playlist = client.post(
+        "/api/batches",
+        json={"text": "https://youtube.com/playlist?list=PL123"},
+    )
+    single = client.post(
+        "/api/batches",
+        json={
+            "text": "https://youtu.be/BaW_jenozKc",
+            "source_mode": "page",
+            "max_items": 5,
+        },
+    )
+
+    assert playlist.status_code == 422
+    assert "页面批量下载" in playlist.json()["detail"]
+    assert single.status_code == 422
+    assert "单视频" in single.json()["detail"]
+
+
 def test_page_batch_resume_and_delete_control_page_collector(tmp_path: Path) -> None:
     database = Database(tmp_path / "page-control.db")
     database.initialize()
@@ -523,6 +604,127 @@ def test_pick_directory_persists_selection(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json() == {"download_directory": str(tmp_path / "picked")}
     assert database.get_setting("download_directory") == str(tmp_path / "picked")
+
+
+def test_youtube_network_settings_default_and_persistence(tmp_path: Path) -> None:
+    client, database, _ = make_client(tmp_path)
+
+    defaults = client.get("/api/settings")
+    assert defaults.status_code == 200
+    assert defaults.json()["youtube_network_mode"] == "system"
+    assert defaults.json()["youtube_proxy_url"] == ""
+
+    saved = client.post(
+        "/api/settings/youtube-network",
+        json={"mode": "manual", "proxy_url": "http://127.0.0.1:7890/"},
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["youtube_proxy_url"] == "http://127.0.0.1:7890"
+    assert database.get_setting("youtube_network_mode") == "manual"
+    assert database.get_setting("youtube_proxy_url") == "http://127.0.0.1:7890"
+
+
+def test_youtube_network_settings_reject_remote_or_authenticated_proxy(tmp_path: Path) -> None:
+    client, _, _ = make_client(tmp_path)
+
+    remote = client.post(
+        "/api/settings/youtube-network",
+        json={"mode": "manual", "proxy_url": "http://192.168.1.2:7890"},
+    )
+    authenticated = client.post(
+        "/api/settings/youtube-network",
+        json={"mode": "manual", "proxy_url": "http://user:secret@127.0.0.1:7890"},
+    )
+
+    assert remote.status_code == 422
+    assert "只能使用本机" in remote.json()["detail"]
+    assert authenticated.status_code == 422
+    assert "用户名或密码" in authenticated.json()["detail"]
+
+
+def test_youtube_network_test_uses_form_values_without_saving(tmp_path: Path) -> None:
+    database = Database(tmp_path / "network-test.db")
+    database.initialize()
+    seen = []
+
+    async def tester(settings):
+        seen.append(settings)
+        return True, "测试通过"
+
+    app = create_app(
+        database,
+        IdleQueue(database),
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        youtube_network_tester=tester,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/settings/youtube-network/test",
+        json={"mode": "manual", "proxy_url": "socks5://localhost:7891"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "message": "测试通过"}
+    assert seen[0].ydl_options() == {"proxy": "socks5://localhost:7891"}
+    assert database.get_setting("youtube_network_mode") is None
+
+
+def test_youtube_auth_endpoints_validate_target_and_control_dedicated_window(tmp_path: Path) -> None:
+    database = Database(tmp_path / "youtube-auth.db")
+    database.initialize()
+
+    class AuthManager:
+        def __init__(self) -> None:
+            self.targets: list[str | None] = []
+            self.completed = 0
+
+        def status(self) -> dict:
+            return {"status": "idle", "message": "尚未验证", "running": False, "has_saved_state": False}
+
+        def start(self, target_url: str | None = None) -> dict:
+            self.targets.append(target_url)
+            return {"status": "waiting", "message": "等待验证", "running": True, "has_saved_state": False}
+
+        def complete(self, timeout: float = 8.0) -> dict:
+            self.completed += 1
+            return {"status": "saved", "message": "已保存", "running": False, "has_saved_state": True}
+
+        def stop(self) -> None:
+            return None
+
+    manager = AuthManager()
+    app = create_app(
+        database,
+        IdleQueue(database),
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        youtube_auth_manager=manager,
+    )
+    client = TestClient(app)
+
+    assert client.get("/api/settings/youtube-auth").json()["status"] == "idle"
+    started = client.post(
+        "/api/settings/youtube-auth/start",
+        json={"target_url": "https://www.youtube.com/shorts/UrgqdJ6vtoY"},
+    )
+    rejected = client.post(
+        "/api/settings/youtube-auth/start",
+        json={"target_url": "https://example.com/video"},
+    )
+    completed = client.post("/api/settings/youtube-auth/complete")
+
+    assert started.status_code == 200
+    assert manager.targets == ["https://www.youtube.com/shorts/UrgqdJ6vtoY"]
+    assert rejected.status_code == 422
+    assert completed.json()["has_saved_state"] is True
+    assert manager.completed == 1
 
 
 def test_open_directory_uses_current_download_directory(tmp_path: Path) -> None:

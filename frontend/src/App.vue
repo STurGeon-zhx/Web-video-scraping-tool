@@ -11,6 +11,13 @@ const activeView = ref(window.location.hash === "#/pages" ? "pages" : "links");
 const pageUrl = ref("");
 const pageMaxItems = ref(50);
 const downloadDirectory = ref("");
+const youtubeNetworkMode = ref("system");
+const youtubeProxyUrl = ref("");
+const youtubeNetworkBusy = ref(false);
+const youtubeNetworkMessage = ref("");
+const youtubeNetworkOk = ref(false);
+const youtubeAuth = ref({ status: "idle", message: "尚未进行 YouTube 登录验证", running: false, has_saved_state: false });
+const youtubeAuthBusy = ref(false);
 const preview = ref(null);
 const batch = ref(null);
 const busy = ref(false);
@@ -23,6 +30,7 @@ const deleteAllBusy = ref(false);
 const historyOpen = ref(false);
 let eventSource = null;
 let pageSession = null;
+let youtubeAuthTimer = null;
 
 const counts = computed(() => batch.value?.counts || {});
 const completedCount = computed(() => (counts.value.completed || 0) + (counts.value.skipped || 0));
@@ -40,6 +48,7 @@ const collectionStatusText = computed(() => {
     waiting_verification: "等待完成页面验证",
     collecting: "正在采集",
     target_reached: "已达到设定数量",
+    insufficient: "未达到设定数量",
     page_ended: "页面已结束",
     login_expired: "登录状态已失效",
     risk_controlled: "页面触发风控",
@@ -73,6 +82,102 @@ async function request(url, options = {}) {
 async function loadSettings() {
   const settings = await request("/api/settings");
   downloadDirectory.value = settings.download_directory;
+  youtubeNetworkMode.value = settings.youtube_network_mode || "system";
+  youtubeProxyUrl.value = settings.youtube_proxy_url || "";
+}
+
+function youtubeNetworkPayload() {
+  return {
+    mode: youtubeNetworkMode.value,
+    proxy_url: youtubeNetworkMode.value === "manual" ? youtubeProxyUrl.value.trim() : "",
+  };
+}
+
+async function saveYoutubeNetwork() {
+  youtubeNetworkBusy.value = true;
+  youtubeNetworkMessage.value = "";
+  try {
+    const result = await request("/api/settings/youtube-network", {
+      method: "POST",
+      body: JSON.stringify(youtubeNetworkPayload()),
+    });
+    youtubeNetworkMode.value = result.youtube_network_mode;
+    youtubeProxyUrl.value = result.youtube_proxy_url;
+    youtubeNetworkOk.value = true;
+    youtubeNetworkMessage.value = result.message;
+  } catch (reason) {
+    youtubeNetworkOk.value = false;
+    youtubeNetworkMessage.value = reason.message;
+  } finally {
+    youtubeNetworkBusy.value = false;
+  }
+}
+
+async function testYoutubeNetwork() {
+  youtubeNetworkBusy.value = true;
+  youtubeNetworkMessage.value = "正在测试 YouTube 连接…";
+  try {
+    const result = await request("/api/settings/youtube-network/test", {
+      method: "POST",
+      body: JSON.stringify(youtubeNetworkPayload()),
+    });
+    youtubeNetworkOk.value = result.ok;
+    youtubeNetworkMessage.value = result.message;
+  } catch (reason) {
+    youtubeNetworkOk.value = false;
+    youtubeNetworkMessage.value = reason.message;
+  } finally {
+    youtubeNetworkBusy.value = false;
+  }
+}
+
+async function loadYoutubeAuth() {
+  youtubeAuth.value = await request("/api/settings/youtube-auth");
+  if (!youtubeAuth.value.running && youtubeAuthTimer) {
+    window.clearInterval(youtubeAuthTimer);
+    youtubeAuthTimer = null;
+  }
+}
+
+function currentYoutubeTarget() {
+  const source = isPageView.value ? pageUrl.value.trim() : inputText.value;
+  const match = source.match(/https:\/\/(?:www\.|m\.)?(?:youtube\.com|youtu\.be)\/[^\s]+/i);
+  return match?.[0] || null;
+}
+
+function startYoutubeAuthPolling() {
+  if (youtubeAuthTimer) return;
+  youtubeAuthTimer = window.setInterval(() => {
+    loadYoutubeAuth().catch((reason) => {
+      youtubeAuth.value = { ...youtubeAuth.value, message: reason.message };
+    });
+  }, 1000);
+}
+
+async function startYoutubeAuth() {
+  youtubeAuthBusy.value = true;
+  try {
+    youtubeAuth.value = await request("/api/settings/youtube-auth/start", {
+      method: "POST",
+      body: JSON.stringify({ target_url: currentYoutubeTarget() }),
+    });
+    startYoutubeAuthPolling();
+  } catch (reason) {
+    youtubeAuth.value = { ...youtubeAuth.value, status: "error", message: reason.message };
+  } finally {
+    youtubeAuthBusy.value = false;
+  }
+}
+
+async function completeYoutubeAuth() {
+  youtubeAuthBusy.value = true;
+  try {
+    youtubeAuth.value = await request("/api/settings/youtube-auth/complete", { method: "POST" });
+  } catch (reason) {
+    youtubeAuth.value = { ...youtubeAuth.value, status: "error", message: reason.message };
+  } finally {
+    youtubeAuthBusy.value = false;
+  }
 }
 
 async function loadHistory(page = 1) {
@@ -346,7 +451,8 @@ onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("hashchange", handleHashChange);
   try {
-    await Promise.all([loadSettings(), loadHistory(1)]);
+    await Promise.all([loadSettings(), loadHistory(1), loadYoutubeAuth()]);
+    if (youtubeAuth.value.running) startYoutubeAuthPolling();
   } catch (reason) {
     error.value = reason.message;
   }
@@ -356,6 +462,8 @@ onBeforeUnmount(() => {
   closeCurrentEvents();
   pageSession?.close();
   pageSession = null;
+  if (youtubeAuthTimer) window.clearInterval(youtubeAuthTimer);
+  youtubeAuthTimer = null;
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("hashchange", handleHashChange);
   document.body.classList.remove("history-drawer-open");
@@ -404,20 +512,50 @@ onBeforeUnmount(() => {
           <span class="step-number">1</span>
           <div>
             <h3>导入视频链接</h3>
-            <p>支持抖音、快手、B站、唯品会商品主视频、视频直链及 yt-dlp 明确支持的视频平台</p>
+            <p>支持抖音、快手、B站、YouTube 单视频与 Shorts、唯品会商品主视频、视频直链及 yt-dlp 明确支持的视频平台</p>
           </div>
         </div>
         <textarea
           ref="inputElement"
           v-model="inputText"
           aria-label="视频链接列表"
-          placeholder="https://www.douyin.com/video/1234567890123456789&#10;https://www.kuaishou.com/f/xxxxxx&#10;https://www.bilibili.com/video/BVxxxxxxxxxx/&#10;https://detail.vip.com/detail-品牌ID-商品ID.html&#10;http://cdn.example.com/video.mp4"
+          placeholder="https://www.douyin.com/video/1234567890123456789&#10;https://www.youtube.com/watch?v=BaW_jenozKc&#10;https://youtu.be/BaW_jenozKc&#10;https://www.youtube.com/shorts/BaW_jenozKc&#10;https://www.bilibili.com/video/BVxxxxxxxxxx/&#10;http://cdn.example.com/video.mp4"
           @blur="previewInput"
         ></textarea>
         <div v-if="preview" class="preview-strip">
           <span class="ok">有效 {{ preview.valid_count }}</span>
           <span>重复 {{ preview.duplicate_count }}</span>
           <span :class="{ warn: preview.invalid_count }">无效 {{ preview.invalid_count }}</span>
+        </div>
+
+        <div class="youtube-network-card youtube-network-card-links">
+          <div class="youtube-network-heading">
+            <div><strong>YouTube 网络</strong><small>仅影响 YouTube 采集和下载</small></div>
+            <select v-model="youtubeNetworkMode" aria-label="YouTube 网络模式">
+              <option value="system">跟随本机网络 / VPN</option>
+              <option value="manual">本地代理</option>
+            </select>
+          </div>
+          <input v-if="youtubeNetworkMode === 'manual'" v-model="youtubeProxyUrl" class="proxy-input" aria-label="YouTube 本地代理地址" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7891" autocomplete="off" />
+          <p class="youtube-network-help">浏览器代理插件不会影响桌面工具；使用全局/TUN VPN 时请选择“跟随本机网络”。连接测试只检查网络通道，不代表所有视频均可匿名访问。</p>
+          <div class="youtube-network-actions">
+            <span v-if="youtubeNetworkMessage" :class="youtubeNetworkOk ? 'network-ok' : 'network-error'">{{ youtubeNetworkMessage }}</span>
+            <button class="secondary-button" type="button" :disabled="youtubeNetworkBusy" @click="testYoutubeNetwork">测试连接</button>
+            <button class="secondary-button" type="button" :disabled="youtubeNetworkBusy" @click="saveYoutubeNetwork">保存设置</button>
+          </div>
+          <div class="youtube-auth-row">
+            <div>
+              <strong>YouTube 登录验证</strong>
+              <small>{{ youtubeAuth.message }}</small>
+              <small>使用工具独立的 Edge 配置，不读取日常浏览器 Cookie；验证窗口会一直保留到你手动完成。</small>
+            </div>
+            <button
+              class="secondary-button youtube-auth-button"
+              type="button"
+              :disabled="youtubeAuthBusy"
+              @click="youtubeAuth.running ? completeYoutubeAuth() : startYoutubeAuth()"
+            >{{ youtubeAuth.running ? "完成验证" : "打开登录验证" }}</button>
+          </div>
         </div>
 
         <div class="directory-row">
@@ -452,13 +590,13 @@ onBeforeUnmount(() => {
           <span class="step-number">1</span>
           <div>
             <h3>导入页面链接</h3>
-            <p>抖音搜索页会打开工具专用 Edge 窗口供你登录；其他公网页面会尽力识别公开媒体。</p>
+            <p>支持 YouTube 播放列表和频道视频页；抖音搜索页会打开工具专用 Edge 窗口供你登录。</p>
           </div>
         </div>
         <textarea
           v-model="pageUrl"
           aria-label="页面链接"
-          placeholder="https://www.douyin.com/search/美食&#10;https://example.com/videos"
+          placeholder="https://www.youtube.com/playlist?list=播放列表ID&#10;https://www.youtube.com/@频道名/videos&#10;https://www.douyin.com/search/美食?type=video"
         ></textarea>
 
         <div class="page-options">
@@ -479,6 +617,36 @@ onBeforeUnmount(() => {
             <span :title="downloadDirectory">{{ downloadDirectory || "正在读取默认目录…" }}</span>
           </div>
           <button class="secondary-button" type="button" @click="chooseDirectory">选择目录</button>
+        </div>
+
+        <div v-if="isPageView" class="youtube-network-card">
+          <div class="youtube-network-heading">
+            <div><strong>YouTube 网络</strong><small>仅影响 YouTube 采集和下载</small></div>
+            <select v-model="youtubeNetworkMode" aria-label="YouTube 网络模式">
+              <option value="system">跟随本机网络 / VPN</option>
+              <option value="manual">本地代理</option>
+            </select>
+          </div>
+          <input v-if="youtubeNetworkMode === 'manual'" v-model="youtubeProxyUrl" class="proxy-input" aria-label="YouTube 本地代理地址" placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7891" autocomplete="off" />
+          <p class="youtube-network-help">浏览器代理插件不会影响桌面工具；使用全局/TUN VPN 时请选择“跟随本机网络”。连接测试只检查网络通道，不代表所有视频均可匿名访问。</p>
+          <div class="youtube-network-actions">
+            <span v-if="youtubeNetworkMessage" :class="youtubeNetworkOk ? 'network-ok' : 'network-error'">{{ youtubeNetworkMessage }}</span>
+            <button class="secondary-button" type="button" :disabled="youtubeNetworkBusy" @click="testYoutubeNetwork">测试连接</button>
+            <button class="secondary-button" type="button" :disabled="youtubeNetworkBusy" @click="saveYoutubeNetwork">保存设置</button>
+          </div>
+          <div class="youtube-auth-row">
+            <div>
+              <strong>YouTube 登录验证</strong>
+              <small>{{ youtubeAuth.message }}</small>
+              <small>使用工具独立的 Edge 配置，不读取日常浏览器 Cookie；验证窗口会一直保留到你手动完成。</small>
+            </div>
+            <button
+              class="secondary-button youtube-auth-button"
+              type="button"
+              :disabled="youtubeAuthBusy"
+              @click="youtubeAuth.running ? completeYoutubeAuth() : startYoutubeAuth()"
+            >{{ youtubeAuth.running ? "完成验证" : "打开登录验证" }}</button>
+          </div>
         </div>
 
         <div v-if="error" class="alert error-alert">{{ error }}</div>

@@ -79,6 +79,11 @@ def _douyin_video_id(url: str) -> str | None:
 
 
 def extractor_supports_url(url: str) -> bool:
+    from .youtube import classify_youtube_url
+
+    youtube = classify_youtube_url(url)
+    if youtube is not None:
+        return youtube.kind == "single"
     if _is_kuaishou_url(url):
         return True
     if _is_vipshop_url(url):
@@ -138,7 +143,7 @@ class BatchExpander:
         videos: list[ExpandedVideo] = []
         seen: set[tuple[str, str]] = set()
         duplicate_count = 0
-        options = {
+        base_options = {
             "quiet": True,
             "no_warnings": True,
             "noplaylist": False,
@@ -147,6 +152,31 @@ class BatchExpander:
             "skip_download": True,
         }
         for url, original in zip(urls, originals, strict=True):
+            from .youtube import classify_youtube_url, youtube_video_id
+
+            options = dict(base_options)
+            youtube = classify_youtube_url(url)
+            if youtube is not None and youtube.kind == "single":
+                video_id = youtube_video_id(url)
+                if video_id is None:
+                    raise BatchExpansionError("YouTube 链接中没有有效的视频 ID")
+                key = ("youtube", video_id)
+                if key in seen:
+                    duplicate_count += 1
+                    continue
+                seen.add(key)
+                videos.append(
+                    ExpandedVideo(
+                        platform="youtube",
+                        video_id=video_id,
+                        title="",
+                        canonical_url=youtube.canonical_url,
+                        original_url=original,
+                    )
+                )
+                if len(videos) > self._limit:
+                    raise BatchExpansionError(f"每个批次最多支持 {self._limit} 个视频")
+                continue
             douyin_video_id = _douyin_video_id(url)
             if douyin_video_id is not None:
                 key = ("douyin", douyin_video_id)

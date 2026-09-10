@@ -20,6 +20,9 @@ from .downloader import YtDlpDownloader
 from .page_collector import BrowserPageCollector, PageCollectionManager, PlaywrightBrowserSession
 from .queue import TaskQueue
 from .store import Database
+from .youtube import YoutubePageCollector, is_youtube_page_url
+from .youtube_auth import YoutubeAuthManager
+from .youtube_network import YoutubeNetworkSettingsProvider
 
 
 APP_NAME = "DouyinBatchDownloader"
@@ -67,12 +70,42 @@ def find_ffmpeg() -> Path | None:
 def create_downloader(
     data_dir: Path,
     ffmpeg_location: Path | None = None,
+    database: Database | None = None,
+    youtube_auth: YoutubeAuthManager | None = None,
 ) -> YtDlpDownloader:
     cookie_provider = AnonymousCookieProvider(data_dir / "browser")
+    network_provider = YoutubeNetworkSettingsProvider(database) if database is not None else None
     return YtDlpDownloader(
         ffmpeg_location=ffmpeg_location,
         cookie_file=cookie_provider.cookie_file,
         cookie_provider=cookie_provider,
+        youtube_network_options_provider=(
+            network_provider.ydl_options if network_provider is not None else None
+        ),
+        youtube_auth_options_provider=(
+            youtube_auth.cookie_options if youtube_auth is not None else None
+        ),
+    )
+
+
+def create_page_collector(
+    source_url: str,
+    data_dir: Path,
+    database: Database | None = None,
+    youtube_auth: YoutubeAuthManager | None = None,
+):
+    if is_youtube_page_url(source_url):
+        network_provider = YoutubeNetworkSettingsProvider(database) if database is not None else None
+        return YoutubePageCollector(
+            network_options_provider=(
+                network_provider.ydl_options if network_provider is not None else None
+            ),
+            auth_options_provider=(
+                youtube_auth.cookie_options if youtube_auth is not None else None
+            ),
+        )
+    return BrowserPageCollector(
+        lambda: PlaywrightBrowserSession(data_dir / "browser")
     )
 
 
@@ -162,14 +195,14 @@ def main() -> None:
         logging.info("启动阶段: SQLite 已初始化")
         ffmpeg_path = find_ffmpeg()
         logging.info("启动阶段: FFmpeg 路径=%s", ffmpeg_path)
-        downloader = create_downloader(data_dir, ffmpeg_path)
+        youtube_network = YoutubeNetworkSettingsProvider(database)
+        youtube_auth = YoutubeAuthManager(data_dir / "youtube", youtube_network.ydl_options)
+        downloader = create_downloader(data_dir, ffmpeg_path, database, youtube_auth)
         queue = TaskQueue(database, downloader, worker_count=2)
         page_manager = PageCollectionManager(
             database,
             queue,
-            lambda _url: BrowserPageCollector(
-                lambda: PlaywrightBrowserSession(data_dir / "browser")
-            ),
+            lambda url: create_page_collector(url, data_dir, database, youtube_auth),
         )
         port = select_available_port()
         logging.info("启动阶段: 已选择端口 %s", port)
@@ -196,6 +229,7 @@ def main() -> None:
             shutdown_callback=request_shutdown,
             static_dir=frontend_dir,
             page_collection_manager=page_manager,
+            youtube_auth_manager=youtube_auth,
         )
         config = create_server_config(app, port)
         server = uvicorn.Server(config)

@@ -64,6 +64,24 @@ textarea:focus { background: white; border-color: #84adff; box-shadow: 0 0 0 4px
 .preview-strip .ok { color: var(--green); }
 .preview-strip .warn { color: var(--red); }
 .directory-row { gap: 14px; margin: 22px 0; padding: 15px; background: #f8fafc; border: 1px solid #e5eaf1; border-radius: 12px; }
+.youtube-network-card { margin: -8px 0 22px; padding: 15px; background: #f8fafc; border: 1px solid #e5eaf1; border-radius: 12px; }
+.youtube-network-card-links { margin-top: 18px; margin-bottom: 0; }
+.youtube-network-heading, .youtube-network-actions { display: flex; align-items: center; gap: 12px; }
+.youtube-network-heading { justify-content: space-between; }
+.youtube-network-heading div { display: grid; gap: 3px; }
+.youtube-network-heading small, .youtube-network-help { color: #667085; font-size: 12px; }
+.youtube-network-heading select, .proxy-input { border: 1px solid #cfd8e6; border-radius: 9px; background: #fff; color: #17233c; font: inherit; }
+.youtube-network-heading select { min-width: 205px; padding: 9px 11px; }
+.proxy-input { box-sizing: border-box; width: 100%; margin-top: 12px; padding: 10px 12px; }
+.youtube-network-help { margin: 10px 0 0; }
+.youtube-network-actions { justify-content: flex-end; margin-top: 10px; }
+.youtube-network-actions span { margin-right: auto; font-size: 12px; }
+.youtube-auth-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 13px; padding-top: 13px; border-top: 1px solid #e5eaf1; }
+.youtube-auth-row > div { display: grid; gap: 3px; }
+.youtube-auth-row small { color: #667085; font-size: 12px; }
+.youtube-auth-button { flex: 0 0 auto; }
+.network-ok { color: #067647; }
+.network-error { color: #b42318; }
 .page-options { margin-top: 18px; }
 .count-field { display: flex; align-items: center; gap: 14px; padding: 15px; background: #f8fafc; border: 1px solid #e5eaf1; border-radius: 12px; }
 .count-copy { flex: 1; display: grid; gap: 3px; }
@@ -157,6 +175,10 @@ footer { color: #98a2b3; text-align: center; font-size: 12px; padding: 28px 0 8p
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .metrics > div:first-child { grid-column: span 2; }
   .task-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .youtube-network-heading, .youtube-network-actions { align-items: stretch; flex-direction: column; }
+  .youtube-auth-row { align-items: stretch; flex-direction: column; }
+  .youtube-network-heading select { width: 100%; }
+  .youtube-network-actions span { margin-right: 0; }
   .history-drawer { width: 92vw; padding: 18px; }
   .history-drawer-header { align-items: flex-start; }
   .history-actions { display: grid; grid-template-columns: 1fr 1fr; }

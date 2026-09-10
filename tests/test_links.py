@@ -55,3 +55,18 @@ def test_invalid_port_is_counted_as_invalid_instead_of_crashing() -> None:
 
     assert preview.valid_urls == []
     assert preview.invalid_count == 1
+
+
+def test_normalizes_youtube_single_urls_and_removes_tracking_parameters() -> None:
+    assert normalize_url("https://youtu.be/BaW_jenozKc?si=tracking") == (
+        "https://www.youtube.com/watch?v=BaW_jenozKc"
+    )
+    assert normalize_url(
+        "https://www.youtube.com/watch?v=BaW_jenozKc&list=PL123&t=30"
+    ) == "https://www.youtube.com/watch?v=BaW_jenozKc"
+
+
+def test_normalizes_youtube_channel_root_to_videos_page() -> None:
+    assert normalize_url("https://youtube.com/@example") == (
+        "https://www.youtube.com/@example/videos"
+    )

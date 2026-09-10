@@ -120,6 +120,14 @@ beforeEach(() => {
     if (url === "/api/settings") {
       return jsonResponse({ download_directory: "D:\\Videos" });
     }
+    if (url === "/api/settings/youtube-auth") {
+      return jsonResponse({
+        status: "idle",
+        message: "尚未进行 YouTube 登录验证",
+        running: false,
+        has_saved_state: false,
+      });
+    }
     if (url === "/api/batches?page=1&page_size=20") {
       return jsonResponse(historyPayload);
     }
@@ -321,6 +329,93 @@ test("当前批次处理中数量包含兼容转换任务", async () => {
   wrapper.unmount();
 });
 
+test("两个功能页共用 YouTube 网络设置", async () => {
+  const wrapper = await mountApp();
+
+  expect(wrapper.get(".youtube-network-card").text()).toContain("YouTube 网络");
+  expect(wrapper.get(".youtube-network-help").text()).toContain("浏览器代理插件不会影响桌面工具");
+
+  await wrapper.get(".page-download-nav").trigger("click");
+  await nextTick();
+  expect(wrapper.get(".youtube-network-card").text()).toContain("仅影响 YouTube 采集和下载");
+  wrapper.unmount();
+});
+
+test("可测试并保存本机 YouTube 代理", async () => {
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (url === "/api/settings") {
+      return jsonResponse({
+        download_directory: "D:\\Videos",
+        youtube_network_mode: "system",
+        youtube_proxy_url: "",
+      });
+    }
+    if (url === "/api/settings/youtube-auth") {
+      return jsonResponse({ status: "idle", message: "尚未验证", running: false, has_saved_state: false });
+    }
+    if (url === "/api/batches?page=1&page_size=20") return jsonResponse(historyPayload);
+    if (url === "/api/settings/youtube-network/test") {
+      return jsonResponse({ ok: true, message: "YouTube 网络连接正常" });
+    }
+    if (url === "/api/settings/youtube-network") {
+      return jsonResponse({
+        youtube_network_mode: "manual",
+        youtube_proxy_url: "http://127.0.0.1:7890",
+        message: "YouTube 网络设置已保存",
+      });
+    }
+    throw new Error(`未处理的测试请求: ${url}`);
+  });
+  const wrapper = await mountApp();
+  await wrapper.get("select[aria-label='YouTube 网络模式']").setValue("manual");
+  await wrapper.get("input[aria-label='YouTube 本地代理地址']").setValue("http://127.0.0.1:7890");
+  const buttons = wrapper.findAll(".youtube-network-actions button");
+
+  await buttons[0].trigger("click");
+  await flushPromises();
+  expect(wrapper.get(".network-ok").text()).toContain("连接正常");
+  expect(JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith("/test"))[1].body)).toEqual({
+    mode: "manual",
+    proxy_url: "http://127.0.0.1:7890",
+  });
+
+  await buttons[1].trigger("click");
+  await flushPromises();
+  expect(wrapper.get(".network-ok").text()).toContain("已保存");
+  wrapper.unmount();
+});
+
+test("可打开工具专用 YouTube 验证窗口并手动完成", async () => {
+  fetch.mockImplementation(async (url, options = {}) => {
+    if (url === "/api/settings") return jsonResponse({ download_directory: "D:\\Videos" });
+    if (url === "/api/batches?page=1&page_size=20") return jsonResponse(historyPayload);
+    if (url === "/api/settings/youtube-auth") {
+      return jsonResponse({ status: "idle", message: "尚未验证", running: false, has_saved_state: false });
+    }
+    if (url === "/api/settings/youtube-auth/start" && options.method === "POST") {
+      return jsonResponse({ status: "waiting", message: "请在 Edge 中完成验证", running: true, has_saved_state: false });
+    }
+    if (url === "/api/settings/youtube-auth/complete" && options.method === "POST") {
+      return jsonResponse({ status: "saved", message: "已保存工具专用 YouTube 验证状态", running: false, has_saved_state: true });
+    }
+    throw new Error(`未处理的测试请求: ${url}`);
+  });
+  const wrapper = await mountApp();
+  await wrapper.get("textarea[aria-label='视频链接列表']").setValue("https://www.youtube.com/shorts/UrgqdJ6vtoY");
+
+  await wrapper.get(".youtube-auth-button").trigger("click");
+  await flushPromises();
+  expect(JSON.parse(fetch.mock.calls.find(([url]) => url.endsWith("/start"))[1].body)).toEqual({
+    target_url: "https://www.youtube.com/shorts/UrgqdJ6vtoY",
+  });
+  expect(wrapper.get(".youtube-auth-button").text()).toBe("完成验证");
+
+  await wrapper.get(".youtube-auth-button").trigger("click");
+  await flushPromises();
+  expect(wrapper.get(".youtube-auth-row").text()).toContain("已保存工具专用 YouTube 验证状态");
+  wrapper.unmount();
+});
+
 describe("页面批量下载功能页", () => {
   test("顶部按钮通过 Hash 进入独立页面并可返回", async () => {
     const wrapper = await mountApp();
@@ -346,6 +441,19 @@ describe("页面批量下载功能页", () => {
 
     expect(wrapper.get("textarea").attributes("aria-label")).toBe("页面链接");
     expect(wrapper.get("input[type='number']").element.value).toBe("50");
+    wrapper.unmount();
+  });
+
+  test("两个入口展示对应的 YouTube 示例", async () => {
+    const wrapper = await mountApp();
+
+    expect(wrapper.get("textarea").attributes("placeholder")).toContain("youtube.com/watch");
+    expect(wrapper.text()).toContain("YouTube 单视频与 Shorts");
+
+    await wrapper.get(".page-download-nav").trigger("click");
+    await nextTick();
+    expect(wrapper.get("textarea").attributes("placeholder")).toContain("youtube.com/playlist");
+    expect(wrapper.get("textarea").attributes("placeholder")).toContain("/@频道名/videos");
     wrapper.unmount();
   });
 
@@ -392,5 +500,29 @@ describe("页面批量下载功能页", () => {
     );
     expect(wrapper.get(".collection-status").text()).toContain("等待开始采集");
     wrapper.unmount();
+  });
+
+  test("页面耗尽时展示数量不足及实际采集数", async () => {
+    Object.assign(batchPayload, {
+      source_mode: "page",
+      requested_count: 100,
+      collected_count: 63,
+      collection_status: "insufficient",
+      collection_stop_reason: "仅采集到 63/100 条，页面没有更多可下载的公开视频",
+    });
+    const wrapper = await mountApp();
+    await wrapper.get(".history-trigger").trigger("click");
+    await wrapper.get(".history-actions .secondary-button").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get(".collection-status").text()).toContain("未达到设定数量");
+    expect(wrapper.get(".collection-status").text()).toContain("已采集 63 / 100 条");
+    expect(wrapper.get(".collection-status").text()).toContain("仅采集到 63/100 条");
+    wrapper.unmount();
+    delete batchPayload.source_mode;
+    delete batchPayload.requested_count;
+    delete batchPayload.collected_count;
+    delete batchPayload.collection_status;
+    delete batchPayload.collection_stop_reason;
   });
 });

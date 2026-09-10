@@ -9,6 +9,7 @@
 - 每行一条链接，也支持直接粘贴含链接的分享文案
 - 支持 yt-dlp 明确提供专用解析器的视频平台，包括抖音、B站等；不使用通用网页解析器
 - 内置快手公开单视频适配，支持 `/f/...` 分享链接和 `/short-video/...` 作品链接
+- 链接页支持 YouTube 单视频、`youtu.be` 和 Shorts；页面页支持 YouTube 播放列表与频道视频页
 - 支持单视频、合集和播放列表，每条列表及整个批次最多展开 500 个视频
 - 两条任务并发、网络重试、限流冷却和 `.part` 续传
 - SQLite 保存批次、任务和设置，重启后恢复未完成任务
@@ -32,10 +33,13 @@
 
 ```powershell
 python -m pip install -e ".[dev,download,desktop,build]"
+powershell -ExecutionPolicy Bypass -File scripts/setup-youtube-runtime.ps1
 npm --prefix frontend install
 npm --prefix frontend run build
 python run_desktop.py
 ```
+
+YouTube 使用固定版本的 Deno 与 `yt-dlp-ejs`。Deno 只会在手动运行上述脚本时下载并校验，程序运行时不会静默安装或升级。YouTube 仅处理匿名可访问的公开视频；遇到机器人验证、PO Token、私密、会员、付费、年龄限制或直播内容时会明确停止，不读取浏览器 Cookie，也不会弹出登录窗口。
 
 开发测试：
 
@@ -71,6 +75,7 @@ powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1
 - **匿名 Cookie 获取失败**：确认 Microsoft Edge 可正常启动且没有被安全软件阻止。
 - **平台改版后无法解析**：解析内核不会静默在线更新，需要更新项目版本。
 - **快手匿名访问失败**：快手可能对频繁访问触发风控，请稍后再试；工具不会读取账号 Cookie 或绕过验证。
+- **YouTube 匿名访问受限**：当前网络出口可能触发机器人验证或 PO Token 限制，请更换网络后重试；本工具不会要求登录或读取 Cookie。
 
 ## 隐私与安全
 

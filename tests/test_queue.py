@@ -94,6 +94,35 @@ def test_network_failure_retries_three_times_then_succeeds(tmp_path: Path) -> No
     assert task["output_path"] == str(tmp_path / "完成.mp4")
 
 
+def test_proxy_failure_retries_three_times_then_continues_next_task(tmp_path: Path) -> None:
+    database, batch_id = make_database(tmp_path, 2)
+
+    class ProxyFailureThenSuccess:
+        def __init__(self) -> None:
+            self.calls: dict[int, int] = {}
+
+        def download(self, task, on_progress):
+            self.calls[task.id] = self.calls.get(task.id, 0) + 1
+            if task.position == 1:
+                raise DownloadError(ErrorCode.PROXY_UNAVAILABLE, "proxy connection refused")
+            output = tmp_path / f"{task.id}.mp4"
+            output.write_bytes(b"video")
+            return DownloadResult(task.video_id or "unknown", "完成", output)
+
+    downloader = ProxyFailureThenSuccess()
+    queue = TaskQueue(database, downloader, worker_count=1, retry_delays=(0, 0))
+    queue.start()
+    try:
+        wait_until(lambda: database.get_batch(batch_id)["counts"] == {"failed": 1, "completed": 1})
+    finally:
+        queue.stop()
+
+    tasks = database.get_batch(batch_id)["tasks"]
+    assert downloader.calls[tasks[0]["id"]] == 3
+    assert downloader.calls[tasks[1]["id"]] == 1
+    assert tasks[0]["error_message"] == "YouTube 本地代理不可用，请检查代理软件、地址和端口"
+
+
 def test_unexpected_task_preparation_error_fails_only_that_task_and_queue_continues(tmp_path: Path) -> None:
     database, batch_id = make_database(tmp_path, 2)
 

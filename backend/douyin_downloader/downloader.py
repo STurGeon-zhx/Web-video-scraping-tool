@@ -60,6 +60,8 @@ class ErrorCode(StrEnum):
     UNSUPPORTED_PLATFORM = "unsupported_platform"
     KUAISHOU_ACCESS = "kuaishou_access"
     VIPSHOP_ACCESS = "vipshop_access"
+    YOUTUBE_RUNTIME = "youtube_runtime"
+    PROXY_UNAVAILABLE = "proxy_unavailable"
     UNAVAILABLE = "unavailable"
     LOGIN_REQUIRED = "login_required"
     ACCESS_RESTRICTED = "access_restricted"
@@ -77,6 +79,8 @@ ERROR_MESSAGES = {
     ErrorCode.UNSUPPORTED_PLATFORM: "该平台暂不支持",
     ErrorCode.KUAISHOU_ACCESS: "快手匿名访问失败，请稍后重试",
     ErrorCode.VIPSHOP_ACCESS: "唯品会匿名访问失败，请稍后重试",
+    ErrorCode.YOUTUBE_RUNTIME: "YouTube 运行组件未安装，请运行 scripts\\setup-youtube-runtime.ps1",
+    ErrorCode.PROXY_UNAVAILABLE: "YouTube 本地代理不可用，请检查代理软件、地址和端口",
     ErrorCode.UNAVAILABLE: "视频不存在或已被删除",
     ErrorCode.LOGIN_REQUIRED: "该视频需要登录或无权访问",
     ErrorCode.ACCESS_RESTRICTED: "当前网络无法访问该视频",
@@ -91,11 +95,16 @@ ERROR_MESSAGES = {
 
 
 class DownloadError(RuntimeError):
-    def __init__(self, code: ErrorCode, detail: str) -> None:
+    def __init__(
+        self,
+        code: ErrorCode,
+        detail: str,
+        user_message: str | None = None,
+    ) -> None:
         super().__init__(detail)
         self.code = code
         self.detail = detail
-        self.user_message = ERROR_MESSAGES[code]
+        self.user_message = user_message or ERROR_MESSAGES[code]
 
 
 class DownloadCancelled(MediaProcessingInterrupted):
@@ -119,6 +128,9 @@ def task_temp_key(task: TaskRecord) -> str:
 
 def classify_download_error(message: str) -> ErrorCode:
     lowered = message.lower()
+    from .youtube import is_youtube_access_restriction
+    from .youtube_network import is_proxy_connection_error
+
     if "快手匿名访问失败" in message:
         return ErrorCode.KUAISHOU_ACCESS
     if "唯品会匿名访问失败" in message:
@@ -129,6 +141,19 @@ def classify_download_error(message: str) -> ErrorCode:
         return ErrorCode.RATE_LIMITED
     if "fresh cookie" in lowered:
         return ErrorCode.FRESH_COOKIE
+    if is_proxy_connection_error(message):
+        return ErrorCode.PROXY_UNAVAILABLE
+    if is_youtube_access_restriction(message) or any(
+        phrase in lowered
+        for phrase in (
+            "po token",
+            "sign in to confirm you're not a bot",
+            "sign in to confirm you’re not a bot",
+            "confirm you are not a bot",
+            "youtube said: sign in",
+        )
+    ):
+        return ErrorCode.ACCESS_RESTRICTED
     if "private" in lowered or "login required" in lowered or "sign in" in lowered:
         return ErrorCode.LOGIN_REQUIRED
     if "10204" in lowered or "ip address is blocked" in lowered or "access denied" in lowered:
@@ -166,12 +191,22 @@ class YtDlpDownloader:
         cookie_file: Path | None = None,
         cookie_provider: CookieProvider | None = None,
         media_processor: MediaProcessor | None = None,
+        youtube_runtime_options_provider: Callable[[], dict[str, Any]] | None = None,
+        youtube_network_options_provider: Callable[[], dict[str, Any]] | None = None,
+        youtube_auth_options_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._ydl_factory = ydl_factory
         self._ffmpeg_location = ffmpeg_location
         self._cookie_file = cookie_file
         self._cookie_provider = cookie_provider
         self._media_processor = media_processor
+        if youtube_runtime_options_provider is None:
+            from .youtube import youtube_runtime_options
+
+            youtube_runtime_options_provider = youtube_runtime_options
+        self._youtube_runtime_options_provider = youtube_runtime_options_provider
+        self._youtube_network_options_provider = youtube_network_options_provider or (lambda: {})
+        self._youtube_auth_options_provider = youtube_auth_options_provider or (lambda: {})
         if self._media_processor is None and ffmpeg_location is not None:
             self._media_processor = FFmpegMediaProcessor(ffmpeg_location)
         self._cookie_lock = threading.Lock()
@@ -232,7 +267,14 @@ class YtDlpDownloader:
         with self._cookie_lock:
             cookie_file = self._cookie_file
             cookie_generation = self._cookie_generation
-        if cookie_file and cookie_file.exists():
+        if task.platform == "youtube":
+            try:
+                options.update(self._youtube_runtime_options_provider())
+                options.update(self._youtube_network_options_provider())
+                options.update(self._youtube_auth_options_provider())
+            except RuntimeError as exc:
+                raise DownloadError(ErrorCode.YOUTUBE_RUNTIME, str(exc)) from exc
+        elif cookie_file and cookie_file.exists():
             options["cookiefile"] = str(cookie_file)
 
         try:
@@ -244,6 +286,7 @@ class YtDlpDownloader:
                     if (
                         classify_download_error(str(exc)) != ErrorCode.FRESH_COOKIE
                         or self._cookie_provider is None
+                        or task.platform == "youtube"
                     ):
                         raise
                     on_progress({"status": "resolving"})
@@ -302,7 +345,15 @@ class YtDlpDownloader:
             raise
         except Exception as exc:
             detail = str(exc)
-            raise DownloadError(classify_download_error(detail), detail) from exc
+            code = classify_download_error(detail)
+            if task.platform == "youtube" and options.get("proxy") and code == ErrorCode.NETWORK:
+                code = ErrorCode.PROXY_UNAVAILABLE
+            youtube_message = None
+            if task.platform == "youtube" and code == ErrorCode.ACCESS_RESTRICTED:
+                from .youtube import youtube_failure_message
+
+                youtube_message = youtube_failure_message(detail)
+            raise DownloadError(code, detail, youtube_message) from exc
 
     def _refresh_cookie(self, url: str, failed_generation: int) -> Path:
         if self._cookie_provider is None:

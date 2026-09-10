@@ -287,7 +287,13 @@ class Database:
             )
             return int(cursor.lastrowid)
 
-    def append_page_video(self, batch_id: int, video: Any) -> bool:
+    def append_page_video(
+        self,
+        batch_id: int,
+        video: Any,
+        *,
+        skip_history_duplicate: bool = False,
+    ) -> bool:
         now = self._now()
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -336,6 +342,9 @@ class Database:
                 if previous is not None and Path(previous["output_path"]).is_file()
                 else None
             )
+            if existing_file is not None and skip_history_duplicate:
+                connection.rollback()
+                return False
             initial_status = (
                 TaskStatus.SKIPPED.value
                 if existing_file is not None
@@ -666,6 +675,17 @@ class Database:
             row = connection.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
         return str(row["value"]) if row else None
 
+    def get_settings(self, keys: tuple[str, ...]) -> dict[str, str]:
+        if not keys:
+            return {}
+        placeholders = ",".join("?" for _key in keys)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT key, value FROM settings WHERE key IN ({placeholders})",
+                keys,
+            ).fetchall()
+        return {str(row["key"]): str(row["value"]) for row in rows}
+
     def set_setting(self, key: str, value: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(
@@ -674,4 +694,16 @@ class Database:
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
                 (key, value),
+            )
+
+    def set_settings(self, values: dict[str, str]) -> None:
+        if not values:
+            return
+        with self._lock, self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO settings(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                tuple(values.items()),
             )

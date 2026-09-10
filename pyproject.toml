@@ -18,7 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 desktop = ["PySide6>=6.8,<7"]
 download = [
-  "yt-dlp>=2026.3.17",
+  "yt-dlp[default]==2026.7.4",
+  "yt-dlp-ejs==0.8.0",
   "curl-cffi>=0.13,<1",
   "playwright>=1.52,<2",
   "imageio-ffmpeg>=0.6,<1",

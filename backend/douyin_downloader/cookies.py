@@ -4,12 +4,19 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 
-def write_netscape_cookie_file(cookies: Iterable[dict[str, Any]], destination: Path) -> None:
+def write_netscape_cookie_file(
+    cookies: Iterable[dict[str, Any]],
+    destination: Path,
+    allowed_domains: tuple[str, ...] = ("douyin.com",),
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     lines = ["# Netscape HTTP Cookie File"]
     for cookie in cookies:
         domain = str(cookie.get("domain") or "").lower()
-        if domain != "douyin.com" and not domain.endswith(".douyin.com"):
+        if not any(
+            domain == allowed or domain.endswith(f".{allowed}")
+            for allowed in allowed_domains
+        ):
             continue
         include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
         secure = "TRUE" if cookie.get("secure") else "FALSE"
@@ -27,7 +34,12 @@ def write_netscape_cookie_file(cookies: Iterable[dict[str, Any]], destination: P
                 ]
             )
         )
-    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    try:
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class AnonymousCookieProvider:

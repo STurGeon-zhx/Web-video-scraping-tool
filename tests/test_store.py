@@ -471,3 +471,34 @@ def test_updates_collection_status_and_lists_resumable_page_batches(tmp_path: Pa
     completed = database.get_batch(completed_id)
     assert completed["collection_status"] == "page_ended"
     assert completed["collection_stop_reason"] == "页面已结束"
+
+
+def test_youtube_page_can_skip_history_duplicate_without_counting_it(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    output = tmp_path / "existing.mp4"
+    output.write_bytes(b"video")
+    old_batch = database.create_page_batch("https://youtube.com/@old/videos", 1, tmp_path)
+    video = ExpandedVideo(
+        "youtube",
+        "BaW_jenozKc",
+        "测试视频",
+        "https://www.youtube.com/watch?v=BaW_jenozKc",
+        "https://youtube.com/@old/videos",
+    )
+    assert database.append_page_video(old_batch, video) is True
+    task_id = database.get_batch(old_batch)["tasks"][0]["id"]
+    database.update_task(
+        task_id,
+        status=TaskStatus.COMPLETED.value,
+        output_path=str(output),
+        progress=100,
+    )
+    new_batch = database.create_page_batch("https://youtube.com/@new/videos", 5, tmp_path)
+
+    assert database.append_page_video(
+        new_batch,
+        video,
+        skip_history_duplicate=True,
+    ) is False
+    assert database.get_batch(new_batch)["collected_count"] == 0
+    assert database.get_batch(new_batch)["tasks"] == []

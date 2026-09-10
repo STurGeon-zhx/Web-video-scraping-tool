@@ -994,7 +994,11 @@ class PageCollectionManager:
                 self.database.update_collection(batch_id, status, reason)
 
             def on_video(video: ExpandedVideo) -> bool:
-                inserted = self.database.append_page_video(batch_id, video)
+                inserted = self.database.append_page_video(
+                    batch_id,
+                    video,
+                    skip_history_duplicate=video.platform == "youtube",
+                )
                 if inserted:
                     self.queue.wake()
                 return inserted
@@ -1014,6 +1018,11 @@ class PageCollectionManager:
             return
         except Exception as exc:
             try:
-                self.database.update_collection(batch_id, "stopped", str(exc))
+                from .youtube import is_youtube_page_url, youtube_failure_message
+
+                reason = youtube_failure_message(str(exc)) if (
+                    "batch" in locals() and is_youtube_page_url(str(batch["source_url"]))
+                ) else str(exc)
+                self.database.update_collection(batch_id, "stopped", reason)
             except KeyError:
                 pass

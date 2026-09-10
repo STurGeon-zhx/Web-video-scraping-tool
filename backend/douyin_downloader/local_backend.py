@@ -13,14 +13,17 @@ import uvicorn
 from .api import create_app
 from .launcher import (
     create_downloader,
+    create_page_collector,
     create_server_config,
     find_ffmpeg,
     find_frontend_directory,
     select_available_port,
 )
-from .page_collector import BrowserPageCollector, PageCollectionManager, PlaywrightBrowserSession
+from .page_collector import PageCollectionManager
 from .queue import TaskQueue
 from .store import Database
+from .youtube_auth import YoutubeAuthManager
+from .youtube_network import YoutubeNetworkSettingsProvider
 
 
 class LocalBackend:
@@ -53,13 +56,19 @@ class LocalBackend:
 
         self.data_dir.mkdir(parents=True, exist_ok=True)
         database = Database(self.data_dir / "tasks.db")
-        downloader = create_downloader(self.data_dir, find_ffmpeg())
+        youtube_network = YoutubeNetworkSettingsProvider(database)
+        youtube_auth = YoutubeAuthManager(
+            self.data_dir / "youtube", youtube_network.ydl_options
+        )
+        downloader = create_downloader(
+            self.data_dir, find_ffmpeg(), database, youtube_auth
+        )
         queue = TaskQueue(database, downloader, worker_count=2)
         page_manager = PageCollectionManager(
             database,
             queue,
-            lambda _url: BrowserPageCollector(
-                lambda: PlaywrightBrowserSession(self.data_dir / "browser")
+            lambda url: create_page_collector(
+                url, self.data_dir, database, youtube_auth
             ),
         )
         port = select_available_port()
@@ -77,6 +86,7 @@ class LocalBackend:
             shutdown_callback=request_shutdown,
             static_dir=find_frontend_directory(),
             page_collection_manager=page_manager,
+            youtube_auth_manager=youtube_auth,
             shutdown_on_page_disconnect=False,
         )
         server = uvicorn.Server(create_server_config(app, port))

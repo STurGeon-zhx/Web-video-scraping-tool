@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Literal, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, status
@@ -19,6 +20,13 @@ from .page_sessions import PageSessionTracker
 from .platforms import BatchExpander, BatchExpansionError, extractor_supports_url
 from .resolver import LinkResolutionError, resolve_public_url
 from .store import Database
+from .youtube import classify_youtube_url, is_youtube_host, youtube_failure_message
+from .youtube_network import (
+    YoutubeNetworkSettings,
+    YoutubeNetworkSettingsProvider,
+    test_youtube_connection,
+    validate_youtube_network_settings,
+)
 
 
 class QueueController(Protocol):
@@ -45,6 +53,13 @@ class PageCollectionController(Protocol):
     def resume_batch(self, batch_id: int) -> None: ...
 
 
+class YoutubeAuthController(Protocol):
+    def status(self) -> dict: ...
+    def start(self, target_url: str | None = None) -> dict: ...
+    def complete(self, timeout: float = 8.0) -> dict: ...
+    def stop(self) -> None: ...
+
+
 class PreviewRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500_000)
 
@@ -53,6 +68,15 @@ class CreateBatchRequest(PreviewRequest):
     output_dir: str | None = None
     source_mode: Literal["links", "page"] = "links"
     max_items: int = Field(default=50, ge=1, le=500)
+
+
+class YoutubeNetworkRequest(BaseModel):
+    mode: Literal["system", "manual"] = "system"
+    proxy_url: str = Field(default="", max_length=500)
+
+
+class YoutubeAuthRequest(BaseModel):
+    target_url: str | None = Field(default=None, max_length=2_000)
 
 
 def _batch_or_404(database: Database, batch_id: int) -> dict:
@@ -114,6 +138,10 @@ def create_app(
     batch_expander: BatchExpander | None = None,
     page_collection_manager: PageCollectionController | None = None,
     shutdown_on_page_disconnect: bool = True,
+    youtube_network_tester: Callable[
+        [YoutubeNetworkSettings], Awaitable[tuple[bool, str]]
+    ] = test_youtube_connection,
+    youtube_auth_manager: YoutubeAuthController | None = None,
 ) -> FastAPI:
     page_disconnect_callback = shutdown_callback if shutdown_on_page_disconnect else lambda: None
     page_sessions = PageSessionTracker(page_disconnect_callback, grace_seconds=30.0)
@@ -131,11 +159,14 @@ def create_app(
             await page_sessions.close()
             if page_collection_manager is not None:
                 page_collection_manager.stop()
+            if youtube_auth_manager is not None:
+                youtube_auth_manager.stop()
             queue.stop()
 
     app = FastAPI(title="视频批量下载工具", version="0.2.0", lifespan=lifespan)
     app.state.page_sessions = page_sessions
     expander = batch_expander or BatchExpander()
+    youtube_network = YoutubeNetworkSettingsProvider(database)
 
     async def resolve_short_link(url: str) -> str:
         if short_link_resolver:
@@ -166,10 +197,25 @@ def create_app(
                 raise HTTPException(status_code=422, detail="页面批量下载每次只能导入一个页面链接")
             if page_collection_manager is None:
                 raise HTTPException(status_code=503, detail="页面采集功能当前不可用")
-            try:
-                source_url = await resolve_short_link(preview.valid_urls[0])
-            except LinkResolutionError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            candidate_url = preview.valid_urls[0]
+            youtube = classify_youtube_url(candidate_url)
+            if youtube is not None:
+                if youtube.kind == "single":
+                    raise HTTPException(
+                        status_code=422,
+                        detail="YouTube 单视频请使用链接批量下载",
+                    )
+                if youtube.kind != "page":
+                    raise HTTPException(
+                        status_code=422,
+                        detail="YouTube 页面批量下载仅支持播放列表或频道视频页",
+                    )
+                source_url = youtube.canonical_url
+            else:
+                try:
+                    source_url = await resolve_short_link(candidate_url)
+                except LinkResolutionError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
             if is_douyin_search_url(source_url):
                 try:
                     douyin_search_mode(source_url)
@@ -191,7 +237,19 @@ def create_app(
         resolution_duplicates = 0
         try:
             for url in preview.valid_urls:
-                resolved = await resolve_short_link(url)
+                youtube = classify_youtube_url(url)
+                if youtube is not None:
+                    if youtube.kind == "page":
+                        raise BatchExpansionError(
+                            "YouTube 播放列表或频道页请使用页面批量下载"
+                        )
+                    if youtube.kind != "single":
+                        raise BatchExpansionError(
+                            "该 YouTube 地址暂不支持；链接下载仅支持单视频、youtu.be 和 Shorts"
+                        )
+                    resolved = youtube.canonical_url
+                else:
+                    resolved = await resolve_short_link(url)
                 if not extractor_supports_url(resolved):
                     raise BatchExpansionError("该链接没有匹配到受支持的平台专用解析器")
                 if resolved in seen_urls:
@@ -208,7 +266,10 @@ def create_app(
         except (LinkResolutionError, BatchExpansionError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
-            raise HTTPException(status_code=422, detail=f"平台解析失败: {exc}") from exc
+            detail = youtube_failure_message(str(exc)) if any(
+                classify_youtube_url(url) is not None for url in resolved_urls
+            ) else str(exc)
+            raise HTTPException(status_code=422, detail=f"平台解析失败: {detail}") from exc
         configured = database.get_setting("download_directory")
         output_dir = Path(request.output_dir or configured or default_download_dir).expanduser().resolve()
         try:
@@ -302,7 +363,69 @@ def create_app(
     @app.get("/api/settings")
     async def get_settings() -> dict:
         directory = database.get_setting("download_directory") or str(default_download_dir)
-        return {"download_directory": directory}
+        network = youtube_network.get()
+        return {
+            "download_directory": directory,
+            "youtube_network_mode": network.mode,
+            "youtube_proxy_url": network.proxy_url,
+        }
+
+    def validated_youtube_network(request: YoutubeNetworkRequest) -> YoutubeNetworkSettings:
+        try:
+            return validate_youtube_network_settings(request.mode, request.proxy_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/settings/youtube-network")
+    async def save_youtube_network(request: YoutubeNetworkRequest) -> dict:
+        network = validated_youtube_network(request)
+        youtube_network.save(network)
+        return {
+            "youtube_network_mode": network.mode,
+            "youtube_proxy_url": network.proxy_url,
+            "message": "YouTube 网络设置已保存",
+        }
+
+    @app.post("/api/settings/youtube-network/test")
+    async def test_youtube_network(request: YoutubeNetworkRequest) -> dict:
+        network = validated_youtube_network(request)
+        try:
+            ok, message = await youtube_network_tester(network)
+        except TimeoutError:
+            ok = False
+            message = "YouTube 连接测试超时，请检查网络或本地代理"
+        return {"ok": ok, "message": message}
+
+    @app.get("/api/settings/youtube-auth")
+    async def get_youtube_auth() -> dict:
+        if youtube_auth_manager is None:
+            return {
+                "status": "unavailable",
+                "message": "当前版本未启用 YouTube 登录验证",
+                "running": False,
+                "has_saved_state": False,
+            }
+        return youtube_auth_manager.status()
+
+    @app.post("/api/settings/youtube-auth/start")
+    async def start_youtube_auth(request: YoutubeAuthRequest) -> dict:
+        if youtube_auth_manager is None:
+            raise HTTPException(status_code=503, detail="YouTube 登录验证功能当前不可用")
+        target_url = (request.target_url or "").strip() or None
+        if target_url is not None:
+            try:
+                parsed = urlsplit(target_url)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="YouTube 验证目标链接无效") from exc
+            if parsed.scheme.lower() != "https" or not is_youtube_host(target_url):
+                raise HTTPException(status_code=422, detail="验证窗口只能打开 HTTPS YouTube 链接")
+        return youtube_auth_manager.start(target_url)
+
+    @app.post("/api/settings/youtube-auth/complete")
+    async def complete_youtube_auth() -> dict:
+        if youtube_auth_manager is None:
+            raise HTTPException(status_code=503, detail="YouTube 登录验证功能当前不可用")
+        return await asyncio.to_thread(youtube_auth_manager.complete)
 
     @app.post("/api/settings/pick-directory")
     def choose_directory() -> dict:

@@ -84,6 +84,28 @@ def test_expands_canonical_douyin_video_without_cookie_preflight() -> None:
     assert result.platform_counts == {"douyin": 1}
 
 
+def test_expands_youtube_single_without_network_preflight() -> None:
+    def unexpected_factory(_options):
+        raise AssertionError("YouTube 单视频不应在创建批次时联网预解析")
+
+    expander = BatchExpander(ydl_factory=unexpected_factory)
+
+    result = expander.expand(
+        ["https://www.youtube.com/watch?v=BaW_jenozKc"],
+        ["https://youtu.be/BaW_jenozKc?si=tracking"],
+    )
+
+    assert result.videos == [
+        ExpandedVideo(
+            platform="youtube",
+            video_id="BaW_jenozKc",
+            title="",
+            canonical_url="https://www.youtube.com/watch?v=BaW_jenozKc",
+            original_url="https://youtu.be/BaW_jenozKc?si=tracking",
+        )
+    ]
+
+
 def test_accepts_direct_media_candidates_but_rejects_unsupported_kuaishou_pages() -> None:
     assert extractor_supports_url("https://example.com/video/1") is True
     assert extractor_supports_url("http://cdn.example/video.mp4") is True

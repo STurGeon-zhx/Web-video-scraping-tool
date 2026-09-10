@@ -60,6 +60,11 @@ def is_allowed_douyin_url(url: str) -> bool:
 
 
 def normalize_url(url: str) -> str:
+    from .youtube import classify_youtube_url
+
+    youtube = classify_youtube_url(url)
+    if youtube is not None and youtube.kind != "unsupported":
+        return youtube.canonical_url
     parsed = urlsplit(url.strip())
     scheme = parsed.scheme.lower()
     hostname = (parsed.hostname or "").lower().rstrip(".")

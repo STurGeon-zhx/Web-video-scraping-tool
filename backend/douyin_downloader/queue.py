@@ -24,6 +24,7 @@ class Downloader(Protocol):
 
 RETRYABLE_ERRORS = {
     ErrorCode.NETWORK,
+    ErrorCode.PROXY_UNAVAILABLE,
     ErrorCode.RATE_LIMITED,
     ErrorCode.FRESH_COOKIE,
 }
