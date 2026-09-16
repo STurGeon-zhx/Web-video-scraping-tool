@@ -63,6 +63,14 @@ try {
     if (-not $ffmpeg) {
         throw "FFmpeg was not bundled"
     }
+    $deno = Get-ChildItem -LiteralPath $desktopDirectory -Recurse -Filter "deno.exe" -File
+    if (-not $deno) {
+        throw "Deno was not bundled"
+    }
+    $youtubeEjs = Get-ChildItem -LiteralPath $desktopDirectory -Recurse -Directory -Filter "yt_dlp_ejs"
+    if (-not $youtubeEjs) {
+        throw "yt-dlp-ejs was not bundled"
+    }
 
     Write-Host "Desktop application built: $($desktopExe.FullName)"
 }

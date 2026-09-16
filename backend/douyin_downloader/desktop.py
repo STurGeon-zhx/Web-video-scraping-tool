@@ -7,6 +7,12 @@ import traceback
 from collections.abc import Callable
 from pathlib import Path
 
+# Qt WebEngine's sandbox cannot start renderer processes reliably from the
+# frozen desktop bundle under elevated Windows accounts. This view only loads
+# the application's loopback UI; platform browsing still runs in Edge.
+if getattr(sys, "frozen", False):
+    os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
 from PySide6.QtCore import QCoreApplication, Qt, QUrl
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -79,12 +85,26 @@ def _configure_application(application: QApplication) -> None:
 
 
 def _configure_logging(data_dir: Path) -> None:
-    logging.basicConfig(
-        filename=data_dir / "application.log",
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        encoding="utf-8",
-    )
+    options = {
+        "level": logging.INFO,
+        "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        "encoding": "utf-8",
+    }
+    try:
+        logging.basicConfig(filename=data_dir / "application.log", **options)
+    except OSError:
+        # A previous process or security scanner may briefly keep the main log
+        # open. Logging must not prevent the desktop application from starting.
+        try:
+            logging.basicConfig(
+                filename=data_dir / f"application-{os.getpid()}.log",
+                **options,
+            )
+        except OSError:
+            logging.basicConfig(
+                level=options["level"],
+                format=options["format"],
+            )
 
 
 def main() -> int:
