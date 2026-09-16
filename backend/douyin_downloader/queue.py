@@ -28,6 +28,13 @@ RETRYABLE_ERRORS = {
     ErrorCode.RATE_LIMITED,
     ErrorCode.FRESH_COOKIE,
 }
+YOUTUBE_CIRCUIT_ERRORS = {
+    ErrorCode.ACCESS_RESTRICTED,
+    ErrorCode.LOGIN_REQUIRED,
+    ErrorCode.YOUTUBE_UNAVAILABLE,
+}
+YOUTUBE_CIRCUIT_THRESHOLD = 3
+YOUTUBE_CIRCUIT_MESSAGE = "连续多个 YouTube 视频在当前网络或账号下不可用，批次已暂停；请测试网络或重新完成 YouTube 登录验证后继续"
 
 
 class TaskQueue:
@@ -36,7 +43,7 @@ class TaskQueue:
         database: Database,
         downloader: Downloader,
         worker_count: int = 2,
-        retry_delays: tuple[float, float] = (2.0, 8.0),
+        retry_delays: tuple[float, ...] = (2.0, 5.0, 15.0, 30.0),
         minimum_free_bytes: int = 1024**3,
     ) -> None:
         self.database = database
@@ -50,6 +57,8 @@ class TaskQueue:
         self._cancel_lock = threading.Lock()
         self._cancelled_batches: set[int] = set()
         self._paused_batches: set[int] = set()
+        self._youtube_failure_lock = threading.Lock()
+        self._youtube_access_failures: dict[int, int] = {}
         self.pause_reason: str | None = None
 
     def start(self) -> None:
@@ -101,9 +110,11 @@ class TaskQueue:
         self._wake_event.set()
 
     def resume_batch(self, batch_id: int) -> None:
-        self.database.set_batch_paused(batch_id, False)
+        self.database.set_batch_paused(batch_id, False, pause_reason=None)
         with self._cancel_lock:
             self._paused_batches.discard(batch_id)
+        with self._youtube_failure_lock:
+            self._youtube_access_failures.pop(batch_id, None)
         self._wake_event.set()
 
     def _is_cancelled(self, batch_id: int) -> bool:
@@ -222,6 +233,7 @@ class TaskQueue:
                     error_code=exc.code.value,
                     error_message=exc.user_message,
                 )
+                self._record_youtube_failure(task, exc.code)
                 return
             except Exception as exc:
                 self.database.update_task(
@@ -245,7 +257,27 @@ class TaskQueue:
                 error_code=None,
                 error_message=None,
             )
+            if task.platform == "youtube":
+                with self._youtube_failure_lock:
+                    self._youtube_access_failures.pop(task.batch_id, None)
             return
+
+    def _record_youtube_failure(self, task: TaskRecord, code: ErrorCode) -> None:
+        if task.platform != "youtube" or code not in YOUTUBE_CIRCUIT_ERRORS:
+            return
+        with self._youtube_failure_lock:
+            failures = self._youtube_access_failures.get(task.batch_id, 0) + 1
+            self._youtube_access_failures[task.batch_id] = failures
+        if failures < YOUTUBE_CIRCUIT_THRESHOLD:
+            return
+        self.database.set_batch_paused(
+            task.batch_id,
+            True,
+            pause_reason=YOUTUBE_CIRCUIT_MESSAGE,
+        )
+        with self._cancel_lock:
+            self._paused_batches.add(task.batch_id)
+        self._wake_event.set()
 
     def _wait_for_retry(self, task: TaskRecord, delay: float) -> bool:
         deadline = time.monotonic() + delay

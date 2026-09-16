@@ -943,6 +943,7 @@ class PageCollectionManager:
             return
         if batch["source_mode"] == "page" and batch["collection_status"] in {
             "pending",
+            "preflight",
             "waiting_login",
             "collecting",
         }:

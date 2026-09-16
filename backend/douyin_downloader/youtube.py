@@ -142,7 +142,7 @@ def youtube_failure_message(message: str) -> str:
     if is_proxy_connection_error(message):
         return "YouTube 本地代理不可用，请检查代理软件、地址和端口"
     if is_youtube_access_restriction(message):
-        return "YouTube 要求登录确认非机器人，当前匿名模式无法下载；可更换低风险网络出口后重试"
+        return "YouTube 要求重新登录或确认非机器人；请打开工具中的 YouTube 登录验证，完成后重试"
     return message
 
 
@@ -280,7 +280,7 @@ class YoutubePageCollector:
             **network_options,
             **self._auth_options_provider(),
         }
-        on_status("collecting", None)
+        on_status("preflight", "正在检查 YouTube 运行组件、网络和登录状态")
         started = self._clock()
         accepted = 0
         examined = 0
@@ -291,6 +291,7 @@ class YoutubePageCollector:
             info = ydl.extract_info(classified.canonical_url, download=False)
             if not isinstance(info, dict):
                 return CollectionOutcome("no_videos", "YouTube 页面没有返回视频信息")
+            on_status("collecting", None)
             entries = info.get("entries") or []
             for entry in entries:
                 control.wait_if_paused()

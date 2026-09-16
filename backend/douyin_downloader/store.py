@@ -87,6 +87,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     output_dir TEXT NOT NULL,
                     paused INTEGER NOT NULL DEFAULT 0,
+                    pause_reason TEXT,
                     source_mode TEXT NOT NULL DEFAULT 'links',
                     source_url TEXT,
                     requested_count INTEGER,
@@ -136,6 +137,8 @@ class Database:
                 connection.execute(
                     "ALTER TABLE batches ADD COLUMN paused INTEGER NOT NULL DEFAULT 0"
                 )
+            if "pause_reason" not in batch_columns:
+                connection.execute("ALTER TABLE batches ADD COLUMN pause_reason TEXT")
             batch_migrations = {
                 "source_mode": "TEXT NOT NULL DEFAULT 'links'",
                 "source_url": "TEXT",
@@ -394,7 +397,7 @@ class Database:
         with self._connect() as connection:
             batch = connection.execute(
                 """
-                SELECT id, output_dir, paused, source_mode, source_url,
+                SELECT id, output_dir, paused, pause_reason, source_mode, source_url,
                     requested_count, collected_count, collection_status,
                     collection_stop_reason, created_at
                 FROM batches WHERE id = ?
@@ -414,6 +417,7 @@ class Database:
             "id": int(batch["id"]),
             "output_dir": batch["output_dir"],
             "paused": bool(batch["paused"]),
+            "pause_reason": batch["pause_reason"],
             "source_mode": str(batch["source_mode"]),
             "source_url": batch["source_url"],
             "requested_count": batch["requested_count"],
@@ -432,7 +436,7 @@ class Database:
             total = int(connection.execute("SELECT COUNT(*) FROM batches").fetchone()[0])
             batches = connection.execute(
                 """
-                SELECT id, output_dir, paused, source_mode, source_url,
+                SELECT id, output_dir, paused, pause_reason, source_mode, source_url,
                     requested_count, collected_count, collection_status,
                     collection_stop_reason, created_at FROM batches
                 ORDER BY id DESC LIMIT ? OFFSET ?
@@ -454,6 +458,7 @@ class Database:
                         "id": int(batch["id"]),
                         "output_dir": str(batch["output_dir"]),
                         "paused": bool(batch["paused"]),
+                        "pause_reason": batch["pause_reason"],
                         "source_mode": str(batch["source_mode"]),
                         "source_url": batch["source_url"],
                         "requested_count": batch["requested_count"],
@@ -515,11 +520,16 @@ class Database:
             cursor = connection.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
             return cursor.rowcount == 1
 
-    def set_batch_paused(self, batch_id: int, paused: bool) -> None:
+    def set_batch_paused(
+        self,
+        batch_id: int,
+        paused: bool,
+        pause_reason: str | None = None,
+    ) -> None:
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
-                "UPDATE batches SET paused = ? WHERE id = ?",
-                (int(paused), batch_id),
+                "UPDATE batches SET paused = ?, pause_reason = ? WHERE id = ?",
+                (int(paused), pause_reason if paused else None, batch_id),
             )
             if cursor.rowcount != 1:
                 raise KeyError(batch_id)

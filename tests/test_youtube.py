@@ -132,7 +132,8 @@ def test_page_collector_keeps_order_filters_entries_and_reaches_target() -> None
     assert result.status == "target_reached"
     assert [video.video_id for video in accepted] == ["AAAAAAAAAAA", "CCCCCCCCCCC", "DDDDDDDDDDD"]
     assert all(video.original_url.endswith("/@example/videos") for video in accepted)
-    assert statuses[0] == ("collecting", None)
+    assert statuses[0][0] == "preflight"
+    assert statuses[1] == ("collecting", None)
 
 
 def test_history_duplicates_do_not_count_toward_requested_items() -> None:

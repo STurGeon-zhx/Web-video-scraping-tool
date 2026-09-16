@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import threading
+from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -62,6 +63,7 @@ class ErrorCode(StrEnum):
     VIPSHOP_ACCESS = "vipshop_access"
     YOUTUBE_RUNTIME = "youtube_runtime"
     PROXY_UNAVAILABLE = "proxy_unavailable"
+    YOUTUBE_UNAVAILABLE = "youtube_unavailable"
     UNAVAILABLE = "unavailable"
     LOGIN_REQUIRED = "login_required"
     ACCESS_RESTRICTED = "access_restricted"
@@ -81,6 +83,7 @@ ERROR_MESSAGES = {
     ErrorCode.VIPSHOP_ACCESS: "唯品会匿名访问失败，请稍后重试",
     ErrorCode.YOUTUBE_RUNTIME: "YouTube 运行组件未安装，请运行 scripts\\setup-youtube-runtime.ps1",
     ErrorCode.PROXY_UNAVAILABLE: "YouTube 本地代理不可用，请检查代理软件、地址和端口",
+    ErrorCode.YOUTUBE_UNAVAILABLE: "该视频在当前 YouTube 网络或账号下不可用，可能受地区、账号验证或删除限制",
     ErrorCode.UNAVAILABLE: "视频不存在或已被删除",
     ErrorCode.LOGIN_REQUIRED: "该视频需要登录或无权访问",
     ErrorCode.ACCESS_RESTRICTED: "当前网络无法访问该视频",
@@ -210,6 +213,7 @@ class YtDlpDownloader:
         if self._media_processor is None and ffmpeg_location is not None:
             self._media_processor = FFmpegMediaProcessor(ffmpeg_location)
         self._cookie_lock = threading.Lock()
+        self._youtube_download_lock = threading.Lock()
         self._cookie_generation = 0
         self._cookie_refresh_error: tuple[int, Exception] | None = None
 
@@ -220,10 +224,15 @@ class YtDlpDownloader:
         temp_key = task_temp_key(task)
         output_template = str(temp_dir / f"{temp_key}.%(ext)s")
 
+        download_started = False
+
         def progress_hook(data: dict[str, Any]) -> None:
+            nonlocal download_started
             if data.get("status") != "downloading":
                 return
             downloaded = int(data.get("downloaded_bytes") or 0)
+            if downloaded > 0:
+                download_started = True
             total = int(data.get("total_bytes") or data.get("total_bytes_estimate") or 0)
             progress = round(downloaded * 100 / total, 2) if total else 0.0
             on_progress(
@@ -272,6 +281,16 @@ class YtDlpDownloader:
                 options.update(self._youtube_runtime_options_provider())
                 options.update(self._youtube_network_options_provider())
                 options.update(self._youtube_auth_options_provider())
+                options.update(
+                    {
+                        "socket_timeout": 45,
+                        "retries": 5,
+                        "fragment_retries": 10,
+                        "extractor_retries": 5,
+                        "file_access_retries": 3,
+                        "concurrent_fragment_downloads": 1,
+                    }
+                )
             except RuntimeError as exc:
                 raise DownloadError(ErrorCode.YOUTUBE_RUNTIME, str(exc)) from exc
         elif cookie_file and cookie_file.exists():
@@ -279,25 +298,31 @@ class YtDlpDownloader:
 
         try:
             info: dict[str, Any]
-            with self._ydl_factory(options) as ydl:
-                try:
-                    info = ydl.extract_info(task.canonical_url, download=True)
-                except Exception as exc:
-                    if (
-                        classify_download_error(str(exc)) != ErrorCode.FRESH_COOKIE
-                        or self._cookie_provider is None
-                        or task.platform == "youtube"
-                    ):
-                        raise
-                    on_progress({"status": "resolving"})
-                    cookie_file = self._refresh_cookie(
-                        task.canonical_url,
-                        failed_generation=cookie_generation,
-                    )
-                    on_progress({"status": "resolving"})
-                    retry_options = {**options, "cookiefile": str(cookie_file)}
-                    with self._ydl_factory(retry_options) as retry_ydl:
-                        info = retry_ydl.extract_info(task.canonical_url, download=True)
+            download_guard = (
+                self._youtube_download_lock
+                if task.platform == "youtube"
+                else nullcontext()
+            )
+            with download_guard:
+                with self._ydl_factory(options) as ydl:
+                    try:
+                        info = ydl.extract_info(task.canonical_url, download=True)
+                    except Exception as exc:
+                        if (
+                            classify_download_error(str(exc)) != ErrorCode.FRESH_COOKIE
+                            or self._cookie_provider is None
+                            or task.platform == "youtube"
+                        ):
+                            raise
+                        on_progress({"status": "resolving"})
+                        cookie_file = self._refresh_cookie(
+                            task.canonical_url,
+                            failed_generation=cookie_generation,
+                        )
+                        on_progress({"status": "resolving"})
+                        retry_options = {**options, "cookiefile": str(cookie_file)}
+                        with self._ydl_factory(retry_options) as retry_ydl:
+                            info = retry_ydl.extract_info(task.canonical_url, download=True)
             source = self._downloaded_path(info)
             if source is None or not source.exists():
                 raise DownloadError(ErrorCode.UNKNOWN, "下载器未返回可用的输出文件")
@@ -346,9 +371,39 @@ class YtDlpDownloader:
         except Exception as exc:
             detail = str(exc)
             code = classify_download_error(detail)
-            if task.platform == "youtube" and options.get("proxy") and code == ErrorCode.NETWORK:
-                code = ErrorCode.PROXY_UNAVAILABLE
             youtube_message = None
+            if (
+                task.platform == "youtube"
+                and options.get("proxy")
+                and code == ErrorCode.NETWORK
+                and any(
+                    phrase in detail.lower()
+                    for phrase in (
+                        "connection refused",
+                        "actively refused",
+                        "failed to establish a new connection",
+                        "no connection could be made",
+                    )
+                )
+            ):
+                code = ErrorCode.PROXY_UNAVAILABLE
+            if task.platform == "youtube" and code == ErrorCode.UNAVAILABLE:
+                code = ErrorCode.YOUTUBE_UNAVAILABLE
+            if task.platform == "youtube" and download_started and (
+                code in {ErrorCode.UNKNOWN, ErrorCode.NETWORK}
+                or any(
+                    phrase in detail.lower()
+                    for phrase in (
+                        "http error 403",
+                        "fragment",
+                        "unable to download video data",
+                        "connection reset",
+                        "remote end closed",
+                    )
+                )
+            ):
+                code = ErrorCode.NETWORK
+                youtube_message = "YouTube 下载连接中断，已保留断点并重新获取下载地址"
             if task.platform == "youtube" and code == ErrorCode.ACCESS_RESTRICTED:
                 from .youtube import youtube_failure_message
 

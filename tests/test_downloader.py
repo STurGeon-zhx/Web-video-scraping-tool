@@ -137,6 +137,104 @@ def test_youtube_download_uses_live_network_options_only_for_youtube(tmp_path: P
     assert "cookiefile" not in captured[1]
 
 
+def test_youtube_uses_conservative_retries_and_single_fragment(tmp_path: Path) -> None:
+    captured: dict = {}
+
+    def factory(options: dict):
+        captured.update(options)
+        return FakeYoutubeDL(options)
+
+    task = replace(make_task(tmp_path), platform="youtube")
+    YtDlpDownloader(
+        ydl_factory=factory,
+        youtube_runtime_options_provider=lambda: {},
+    ).download(task, lambda _event: None)
+
+    assert captured["socket_timeout"] == 45
+    assert captured["retries"] == 5
+    assert captured["fragment_retries"] == 10
+    assert captured["extractor_retries"] == 5
+    assert captured["file_access_retries"] == 3
+    assert captured["concurrent_fragment_downloads"] == 1
+
+
+def test_youtube_downloads_are_serialized_across_workers(tmp_path: Path) -> None:
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+
+    class SlowYoutubeDL(FakeYoutubeDL):
+        def extract_info(self, url: str, download: bool) -> dict:
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            try:
+                threading.Event().wait(0.04)
+                return super().extract_info(url, download)
+            finally:
+                with lock:
+                    active -= 1
+
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: SlowYoutubeDL(options),
+        youtube_runtime_options_provider=lambda: {},
+    )
+    tasks = [
+        replace(make_task(tmp_path / str(index)), id=index, platform="youtube")
+        for index in (1, 2)
+    ]
+    threads = [
+        threading.Thread(target=downloader.download, args=(task, lambda _event: None))
+        for task in tasks
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert maximum == 1
+
+
+def test_youtube_mid_download_403_is_retryable_with_fresh_url(tmp_path: Path) -> None:
+    class FragmentFailureYoutubeDL(FakeYoutubeDL):
+        def extract_info(self, url: str, download: bool) -> dict:
+            self.options["progress_hooks"][0](
+                {"status": "downloading", "downloaded_bytes": 1024, "total_bytes": 4096}
+            )
+            raise RuntimeError("HTTP Error 403: unable to download video data fragment")
+
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: FragmentFailureYoutubeDL(options),
+        youtube_runtime_options_provider=lambda: {},
+    )
+    task = replace(make_task(tmp_path), platform="youtube")
+
+    with pytest.raises(DownloadError) as caught:
+        downloader.download(task, lambda _event: None)
+
+    assert caught.value.code == ErrorCode.NETWORK
+    assert "保留断点" in caught.value.user_message
+
+
+def test_youtube_unavailable_message_does_not_claim_definite_deletion(tmp_path: Path) -> None:
+    class UnavailableYoutubeDL(FakeYoutubeDL):
+        def extract_info(self, url: str, download: bool) -> dict:
+            raise RuntimeError("This video is unavailable")
+
+    downloader = YtDlpDownloader(
+        ydl_factory=lambda options: UnavailableYoutubeDL(options),
+        youtube_runtime_options_provider=lambda: {},
+    )
+    task = replace(make_task(tmp_path), platform="youtube")
+
+    with pytest.raises(DownloadError) as caught:
+        downloader.download(task, lambda _event: None)
+
+    assert caught.value.code == ErrorCode.YOUTUBE_UNAVAILABLE
+    assert "当前 YouTube 网络或账号" in caught.value.user_message
+
+
 def test_manual_youtube_proxy_connection_failure_has_distinct_error(tmp_path: Path) -> None:
     class FailingYoutubeDL(FakeYoutubeDL):
         def extract_info(self, url: str, download: bool) -> dict:
@@ -172,7 +270,7 @@ def test_youtube_bot_verification_has_specific_user_message(tmp_path: Path) -> N
         downloader.download(task, lambda _event: None)
 
     assert caught.value.code == ErrorCode.ACCESS_RESTRICTED
-    assert "登录确认非机器人" in caught.value.user_message
+    assert "YouTube 登录验证" in caught.value.user_message
 
 
 def test_download_prefixes_batch_position_to_preserve_file_order(tmp_path: Path) -> None:

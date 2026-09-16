@@ -11,7 +11,7 @@
 - 内置快手公开单视频适配，支持 `/f/...` 分享链接和 `/short-video/...` 作品链接
 - 链接页支持 YouTube 单视频、`youtu.be` 和 Shorts；页面页支持 YouTube 播放列表与频道视频页
 - 支持单视频、合集和播放列表，每条列表及整个批次最多展开 500 个视频
-- 两条任务并发、网络重试、限流冷却和 `.part` 续传
+- 两条任务并发、网络重试、限流冷却和 `.part` 续传；YouTube 采用单下载、单分片传输以减少不同网络环境下的连接中断
 - SQLite 保存批次、任务和设置，重启后恢复未完成任务
 - 自动选择公开可获得的最高画质，必要时使用内置 FFmpeg 合并音视频
 - 标题文件名自动清理 Windows 非法字符，同名文件绝不覆盖
@@ -39,7 +39,7 @@ npm --prefix frontend run build
 python run_desktop.py
 ```
 
-YouTube 使用固定版本的 Deno 与 `yt-dlp-ejs`。Deno 只会在手动运行上述脚本时下载并校验，程序运行时不会静默安装或升级。YouTube 仅处理匿名可访问的公开视频；遇到机器人验证、PO Token、私密、会员、付费、年龄限制或直播内容时会明确停止，不读取浏览器 Cookie，也不会弹出登录窗口。
+YouTube 使用固定版本的 Deno 与 `yt-dlp-ejs`。Deno 只会在手动运行上述脚本时下载并校验，程序运行时不会静默安装或升级。YouTube 仅处理用户有权下载的公开视频；遇到机器人验证时可使用工具专用浏览器完成验证，登录状态仅保存在本机工具数据目录，不读取日常浏览器 Cookie。私密、会员、付费、年龄限制或直播内容不会尝试绕过。
 
 开发测试：
 
@@ -55,6 +55,15 @@ powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1
 ```
 
 最终产物位于 `release\installer\视频批量下载工具-Setup-1.1.0-Windows-x64.exe`。安装程序为当前用户安装，无需管理员权限；前端、Python 后端、QtWebEngine、yt-dlp、curl-cffi、Playwright 驱动和 FFmpeg 都包含在安装包内。匿名 Cookie 回退使用 Windows 自带的 Edge，不读取用户现有浏览器 Cookie。
+
+## Windows 便携包构建
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-portable.ps1
+powershell -ExecutionPolicy Bypass -File scripts/smoke-test-portable.ps1
+```
+
+构建脚本会生成免安装 ZIP 和 SHA-256 文件，并排除数据库、登录状态、日志及下载内容。冒烟测试会把 ZIP 解压到隔离目录，使用全新的本地数据启动成品、检查 API 与 YouTube 运行组件，并验证关闭窗口后进程正常结束。
 
 ## 使用
 
@@ -75,7 +84,8 @@ powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1
 - **匿名 Cookie 获取失败**：确认 Microsoft Edge 可正常启动且没有被安全软件阻止。
 - **平台改版后无法解析**：解析内核不会静默在线更新，需要更新项目版本。
 - **快手匿名访问失败**：快手可能对频繁访问触发风控，请稍后再试；工具不会读取账号 Cookie 或绕过验证。
-- **YouTube 匿名访问受限**：当前网络出口可能触发机器人验证或 PO Token 限制，请更换网络后重试；本工具不会要求登录或读取 Cookie。
+- **YouTube 访问受限**：先在“YouTube 网络”中测试当前 VPN/代理，再使用工具专用登录验证。连续多个视频受限时批次会自动暂停，避免其余任务全部失败；网络恢复或完成验证后再恢复批次。
+- **YouTube 下载中途失败**：工具会保留 `.part` 断点、重新获取临时媒体地址并重试。请保留下载目录中的 `.douyin-part` 文件夹。
 
 ## 隐私与安全
 

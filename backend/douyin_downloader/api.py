@@ -312,7 +312,7 @@ def create_app(
     @app.get("/api/batches/{batch_id}")
     async def get_batch(batch_id: int) -> dict:
         batch = _batch_or_404(database, batch_id)
-        batch["pause_reason"] = queue.pause_reason
+        batch["pause_reason"] = batch.get("pause_reason") or queue.pause_reason
         return batch
 
     @app.delete("/api/batches/{batch_id}")
@@ -347,7 +347,7 @@ def create_app(
         _batch_or_404(database, batch_id)
         queue.pause_batch(batch_id)
         batch = database.get_batch(batch_id)
-        batch["pause_reason"] = queue.pause_reason
+        batch["pause_reason"] = batch.get("pause_reason") or queue.pause_reason
         return batch
 
     @app.post("/api/batches/{batch_id}/resume")
@@ -357,7 +357,7 @@ def create_app(
         if page_collection_manager is not None:
             page_collection_manager.resume_batch(batch_id)
         batch = database.get_batch(batch_id)
-        batch["pause_reason"] = queue.pause_reason
+        batch["pause_reason"] = batch.get("pause_reason") or queue.pause_reason
         return batch
 
     @app.get("/api/settings")

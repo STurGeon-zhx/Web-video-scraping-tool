@@ -44,6 +44,7 @@ const collectionStatusText = computed(() => {
   if (batch.value?.source_mode !== "page") return "";
   const labels = {
     pending: "等待开始采集",
+    preflight: "正在检查 YouTube 运行环境与网络",
     waiting_login: "等待网页登录",
     waiting_verification: "等待完成页面验证",
     collecting: "正在采集",

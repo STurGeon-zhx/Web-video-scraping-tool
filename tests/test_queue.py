@@ -123,6 +123,50 @@ def test_proxy_failure_retries_three_times_then_continues_next_task(tmp_path: Pa
     assert tasks[0]["error_message"] == "YouTube 本地代理不可用，请检查代理软件、地址和端口"
 
 
+def test_three_consecutive_youtube_access_failures_pause_batch(tmp_path: Path) -> None:
+    database, batch_id = make_database(tmp_path, 4)
+    for task in database.get_batch(batch_id)["tasks"]:
+        database.update_task(task["id"], platform="youtube")
+
+    class RestrictedDownloader:
+        def download(self, task, on_progress):
+            raise DownloadError(ErrorCode.YOUTUBE_UNAVAILABLE, "unavailable")
+
+    queue = TaskQueue(database, RestrictedDownloader(), worker_count=1, retry_delays=(0, 0))
+    queue.start()
+    try:
+        wait_until(lambda: database.get_batch(batch_id)["paused"] is True)
+    finally:
+        queue.stop()
+
+    batch = database.get_batch(batch_id)
+    assert batch["counts"] == {"failed": 3, "queued": 1}
+    assert "重新完成 YouTube 登录验证" in batch["pause_reason"]
+
+
+def test_resuming_youtube_circuit_clears_reason_and_failure_count(tmp_path: Path) -> None:
+    database, batch_id = make_database(tmp_path, 4)
+    for task in database.get_batch(batch_id)["tasks"]:
+        database.update_task(task["id"], platform="youtube")
+
+    class RestrictedDownloader:
+        def download(self, task, on_progress):
+            raise DownloadError(ErrorCode.ACCESS_RESTRICTED, "restricted")
+
+    queue = TaskQueue(database, RestrictedDownloader(), worker_count=1, retry_delays=(0, 0))
+    queue.start()
+    try:
+        wait_until(lambda: database.get_batch(batch_id)["paused"] is True)
+        queue.resume_batch(batch_id)
+        wait_until(lambda: database.get_batch(batch_id)["counts"].get("failed") == 4)
+    finally:
+        queue.stop()
+
+    batch = database.get_batch(batch_id)
+    assert batch["paused"] is False
+    assert batch["pause_reason"] is None
+
+
 def test_unexpected_task_preparation_error_fails_only_that_task_and_queue_continues(tmp_path: Path) -> None:
     database, batch_id = make_database(tmp_path, 2)
 
