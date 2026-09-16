@@ -764,3 +764,53 @@ async def test_sse_stream_emits_batch_snapshot(tmp_path: Path) -> None:
     payload = json.loads(event.split("data: ", 1)[1])
     assert payload["id"] == batch_id
     assert payload["counts"] == {"queued": 1}
+
+
+def test_app_update_endpoints_check_prepare_and_apply(tmp_path: Path) -> None:
+    database = Database(tmp_path / "updates.db")
+    database.initialize()
+    exited: list[bool] = []
+
+    class Updater:
+        def __init__(self) -> None:
+            self.prepared = False
+            self.applied = False
+
+        def status(self) -> dict:
+            return {
+                "current_version": "1.3.0",
+                "packaged": True,
+                "can_self_update": True,
+                "prepared_version": "1.4.0" if self.prepared else None,
+            }
+
+        def check(self) -> dict:
+            return {**self.status(), "latest_version": "1.4.0", "update_available": True}
+
+        def prepare(self) -> dict:
+            self.prepared = True
+            return {**self.check(), "prepared": True, "prepared_version": "1.4.0"}
+
+        def apply(self) -> dict:
+            self.applied = True
+            return {"applying": True, "version": "1.4.0"}
+
+    updater = Updater()
+    app = create_app(
+        database,
+        IdleQueue(database),
+        default_download_dir=tmp_path,
+        pick_directory=lambda: None,
+        open_directory=lambda _path: None,
+        shutdown_callback=lambda: None,
+        app_updater=updater,
+        update_exit_callback=lambda: exited.append(True),
+    )
+    client = TestClient(app)
+
+    assert client.get("/api/app/version").json()["current_version"] == "1.3.0"
+    assert client.post("/api/app/update/check").json()["latest_version"] == "1.4.0"
+    assert client.post("/api/app/update/prepare").json()["prepared"] is True
+    assert client.post("/api/app/update/apply").json()["applying"] is True
+    assert updater.applied is True
+    assert exited == [True]

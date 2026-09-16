@@ -28,6 +28,11 @@ const history = ref({ items: [], page: 1, page_size: 20, total: 0, total_pages: 
 const historyBusy = ref(false);
 const deleteAllBusy = ref(false);
 const historyOpen = ref(false);
+const appVersion = ref({ current_version: "…", packaged: false, can_self_update: false, prepared_version: null });
+const updateOpen = ref(false);
+const updateBusy = ref(false);
+const updateInfo = ref(null);
+const updateError = ref("");
 let eventSource = null;
 let pageSession = null;
 let youtubeAuthTimer = null;
@@ -85,6 +90,56 @@ async function loadSettings() {
   downloadDirectory.value = settings.download_directory;
   youtubeNetworkMode.value = settings.youtube_network_mode || "system";
   youtubeProxyUrl.value = settings.youtube_proxy_url || "";
+}
+
+async function loadAppVersion() {
+  appVersion.value = await request("/api/app/version");
+}
+
+function closeUpdate() {
+  updateOpen.value = false;
+  if (!historyOpen.value) document.body.classList.remove("history-drawer-open");
+}
+
+async function checkAppUpdate() {
+  updateOpen.value = true;
+  updateBusy.value = true;
+  updateError.value = "";
+  document.body.classList.add("history-drawer-open");
+  try {
+    updateInfo.value = await request("/api/app/update/check", { method: "POST" });
+    appVersion.value = { ...appVersion.value, ...updateInfo.value };
+  } catch (reason) {
+    updateError.value = reason.message;
+  } finally {
+    updateBusy.value = false;
+  }
+}
+
+async function prepareAppUpdate() {
+  updateBusy.value = true;
+  updateError.value = "";
+  try {
+    updateInfo.value = await request("/api/app/update/prepare", { method: "POST" });
+    appVersion.value = { ...appVersion.value, ...updateInfo.value };
+  } catch (reason) {
+    updateError.value = reason.message;
+  } finally {
+    updateBusy.value = false;
+  }
+}
+
+async function applyAppUpdate() {
+  const version = updateInfo.value?.prepared_version || appVersion.value.prepared_version;
+  if (!window.confirm(`程序将关闭并更新到 ${version}，完成后自动重新启动。是否继续？`)) return;
+  updateBusy.value = true;
+  updateError.value = "";
+  try {
+    updateInfo.value = { ...updateInfo.value, ...(await request("/api/app/update/apply", { method: "POST" })) };
+  } catch (reason) {
+    updateError.value = reason.message;
+    updateBusy.value = false;
+  }
 }
 
 function youtubeNetworkPayload() {
@@ -329,11 +384,13 @@ function openHistory() {
 
 function closeHistory() {
   historyOpen.value = false;
-  document.body.classList.remove("history-drawer-open");
+  if (!updateOpen.value) document.body.classList.remove("history-drawer-open");
 }
 
 function handleKeydown(event) {
-  if (event.key === "Escape" && historyOpen.value) closeHistory();
+  if (event.key !== "Escape") return;
+  if (updateOpen.value && !updateBusy.value) closeUpdate();
+  else if (historyOpen.value) closeHistory();
 }
 
 async function newBatch() {
@@ -452,7 +509,7 @@ onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("hashchange", handleHashChange);
   try {
-    await Promise.all([loadSettings(), loadHistory(1), loadYoutubeAuth()]);
+    await Promise.all([loadSettings(), loadHistory(1), loadYoutubeAuth(), loadAppVersion()]);
     if (youtubeAuth.value.running) startYoutubeAuthPolling();
   } catch (reason) {
     error.value = reason.message;
@@ -483,6 +540,9 @@ onBeforeUnmount(() => {
       </div>
       <div class="topbar-actions">
         <span class="privacy-badge"><i></i> 数据仅保存在本机</span>
+        <button class="version-trigger" type="button" @click="checkAppUpdate">
+          v{{ appVersion.current_version }}
+        </button>
         <button
           v-if="!isPageView"
           class="feature-nav-button page-download-nav"
@@ -725,6 +785,48 @@ onBeforeUnmount(() => {
 
       <footer>本工具不会上传链接、Cookie 或视频文件。请遵守内容版权和平台规则。</footer>
     </main>
+
+    <div v-if="updateOpen" class="update-overlay" @click.self="!updateBusy && closeUpdate()">
+      <section class="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title">
+        <div class="update-dialog-header">
+          <div>
+            <p class="eyebrow">软件更新</p>
+            <h3 id="update-dialog-title">版本检查</h3>
+          </div>
+          <button class="history-drawer-close" type="button" aria-label="关闭版本检查" :disabled="updateBusy" @click="closeUpdate">×</button>
+        </div>
+        <div class="update-version-row">
+          <span>当前版本</span><strong>v{{ appVersion.current_version }}</strong>
+          <template v-if="updateInfo?.latest_version">
+            <span>最新版本</span><strong>v{{ updateInfo.latest_version }}</strong>
+          </template>
+        </div>
+        <div v-if="updateBusy" class="update-message">{{ updateInfo?.applying ? "程序正在退出并应用更新…" : "正在连接 GitHub，请稍候…" }}</div>
+        <div v-else-if="updateError" class="alert error-alert">{{ updateError }}</div>
+        <template v-else-if="updateInfo">
+          <div class="update-message" :class="{ 'update-available': updateInfo.update_available }">{{ updateInfo.message }}</div>
+          <p v-if="updateInfo.release_title" class="update-title">{{ updateInfo.release_title }}</p>
+          <pre v-if="updateInfo.release_notes" class="update-notes">{{ updateInfo.release_notes }}</pre>
+          <p v-if="updateInfo.download_size" class="update-size">下载大小：{{ formatBytes(updateInfo.download_size) }}</p>
+          <div class="update-actions">
+            <a v-if="updateInfo.release_url" class="secondary-button update-link" :href="updateInfo.release_url" target="_blank" rel="noopener">查看发布页</a>
+            <button
+              v-if="updateInfo.update_available && updateInfo.can_self_update && !updateInfo.prepared"
+              class="primary-button"
+              type="button"
+              @click="prepareAppUpdate"
+            >下载并校验更新</button>
+            <button
+              v-if="updateInfo.prepared || updateInfo.prepared_version"
+              class="primary-button"
+              type="button"
+              @click="applyAppUpdate"
+            >立即重启并更新</button>
+          </div>
+          <p v-if="updateInfo.update_available && !updateInfo.can_self_update" class="update-help">当前运行方式不会自动覆盖程序文件，请从发布页手动下载。</p>
+        </template>
+      </section>
+    </div>
 
     <div v-if="historyOpen" class="history-overlay" @click.self="closeHistory">
       <aside class="history-drawer" role="dialog" aria-modal="true" aria-labelledby="history-drawer-title">

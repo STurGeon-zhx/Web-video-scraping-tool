@@ -23,6 +23,7 @@ from .store import Database
 from .youtube import YoutubePageCollector, is_youtube_page_url
 from .youtube_auth import YoutubeAuthManager
 from .youtube_network import YoutubeNetworkSettingsProvider
+from .updater import AppUpdater
 
 
 APP_NAME = "DouyinBatchDownloader"
@@ -197,6 +198,7 @@ def main() -> None:
         logging.info("启动阶段: FFmpeg 路径=%s", ffmpeg_path)
         youtube_network = YoutubeNetworkSettingsProvider(database)
         youtube_auth = YoutubeAuthManager(data_dir / "youtube", youtube_network.ydl_options)
+        app_updater = AppUpdater(data_dir / "updates")
         downloader = create_downloader(data_dir, ffmpeg_path, database, youtube_auth)
         queue = TaskQueue(database, downloader, worker_count=2)
         page_manager = PageCollectionManager(
@@ -230,6 +232,8 @@ def main() -> None:
             static_dir=frontend_dir,
             page_collection_manager=page_manager,
             youtube_auth_manager=youtube_auth,
+            app_updater=app_updater,
+            update_exit_callback=request_shutdown,
         )
         config = create_server_config(app, port)
         server = uvicorn.Server(config)

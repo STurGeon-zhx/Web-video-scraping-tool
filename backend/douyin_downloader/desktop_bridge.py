@@ -66,3 +66,24 @@ class DirectoryPickerBridge(QObject):
             request.error = exc
         finally:
             request.completed.set()
+
+
+class ApplicationControlBridge(QObject):
+    """Marshal backend application-control requests onto the Qt GUI thread."""
+
+    _quit_requested = Signal()
+
+    def __init__(self, quit_callback: Callable[[], None]) -> None:
+        super().__init__()
+        self._quit_callback = quit_callback
+        self._quit_requested.connect(
+            self._handle_quit,
+            Qt.ConnectionType.QueuedConnection,
+        )
+
+    def request_quit(self) -> None:
+        self._quit_requested.emit()
+
+    @Slot()
+    def _handle_quit(self) -> None:
+        self._quit_callback()

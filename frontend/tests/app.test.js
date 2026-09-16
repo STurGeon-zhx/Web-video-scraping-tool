@@ -128,6 +128,29 @@ beforeEach(() => {
         has_saved_state: false,
       });
     }
+    if (url === "/api/app/version") {
+      return jsonResponse({
+        current_version: "1.3.0",
+        packaged: true,
+        can_self_update: true,
+        prepared_version: null,
+      });
+    }
+    if (url === "/api/app/update/check") {
+      return jsonResponse({
+        current_version: "1.3.0",
+        latest_version: "1.4.0",
+        packaged: true,
+        can_self_update: true,
+        prepared_version: null,
+        update_available: true,
+        release_title: "版本 1.4.0",
+        release_notes: "修复下载稳定性",
+        release_url: "https://github.com/example/release",
+        download_size: 1024,
+        message: "发现新版本 1.4.0",
+      });
+    }
     if (url === "/api/batches?page=1&page_size=20") {
       return jsonResponse(historyPayload);
     }
@@ -326,6 +349,22 @@ test("当前批次处理中数量包含兼容转换任务", async () => {
   await flushPromises();
 
   expect(wrapper.get(".metrics").text()).toContain("处理中1");
+  wrapper.unmount();
+});
+
+test("手动检查版本并显示可用更新", async () => {
+  const wrapper = await mountApp();
+
+  expect(wrapper.get(".version-trigger").text()).toBe("v1.3.0");
+  await wrapper.get(".version-trigger").trigger("click");
+  await flushPromises();
+
+  expect(fetch).toHaveBeenCalledWith(
+    "/api/app/update/check",
+    expect.objectContaining({ method: "POST" }),
+  );
+  expect(wrapper.get(".update-dialog").text()).toContain("发现新版本 1.4.0");
+  expect(wrapper.get(".update-dialog").text()).toContain("下载并校验更新");
   wrapper.unmount();
 });
 

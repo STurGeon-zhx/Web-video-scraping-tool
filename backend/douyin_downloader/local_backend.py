@@ -24,6 +24,7 @@ from .queue import TaskQueue
 from .store import Database
 from .youtube_auth import YoutubeAuthManager
 from .youtube_network import YoutubeNetworkSettingsProvider
+from .updater import AppUpdater
 
 
 class LocalBackend:
@@ -35,11 +36,13 @@ class LocalBackend:
         default_download_dir: Path,
         pick_directory: Callable[[], Path | None],
         open_directory: Callable[[Path], None],
+        request_app_exit: Callable[[], None] | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.default_download_dir = Path(default_download_dir)
         self.pick_directory = pick_directory
         self.open_directory = open_directory
+        self.request_app_exit = request_app_exit
         self.base_url: str | None = None
         self.port: int | None = None
         self._server: uvicorn.Server | None = None
@@ -60,6 +63,7 @@ class LocalBackend:
         youtube_auth = YoutubeAuthManager(
             self.data_dir / "youtube", youtube_network.ydl_options
         )
+        app_updater = AppUpdater(self.data_dir / "updates")
         downloader = create_downloader(
             self.data_dir, find_ffmpeg(), database, youtube_auth
         )
@@ -88,6 +92,8 @@ class LocalBackend:
             page_collection_manager=page_manager,
             youtube_auth_manager=youtube_auth,
             shutdown_on_page_disconnect=False,
+            app_updater=app_updater,
+            update_exit_callback=self.request_app_exit,
         )
         server = uvicorn.Server(create_server_config(app, port))
         thread = threading.Thread(

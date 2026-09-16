@@ -18,7 +18,8 @@ from PySide6.QtGui import QCloseEvent
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
-from .desktop_bridge import DirectoryPickerBridge
+from .desktop_bridge import ApplicationControlBridge, DirectoryPickerBridge
+from . import __version__
 from .desktop_instance import DesktopInstance
 from .launcher import application_data_directory, default_download_directory
 from .local_backend import LocalBackend
@@ -80,7 +81,7 @@ def _open_directory(path: Path) -> None:
 def _configure_application(application: QApplication) -> None:
     QCoreApplication.setOrganizationName("DouyinBatchDownloader")
     QCoreApplication.setApplicationName(APP_TITLE)
-    QCoreApplication.setApplicationVersion("1.1.0")
+    QCoreApplication.setApplicationVersion(__version__)
     application.setQuitOnLastWindowClosed(True)
 
 
@@ -119,11 +120,13 @@ def main() -> int:
     data_dir = application_data_directory()
     _configure_logging(data_dir)
     bridge = DirectoryPickerBridge()
+    application_control = ApplicationControlBridge(application.quit)
     backend = LocalBackend(
         data_dir=data_dir,
         default_download_dir=default_download_directory(),
         pick_directory=bridge.pick_directory,
         open_directory=_open_directory,
+        request_app_exit=application_control.request_quit,
     )
     window: DesktopWindow | None = None
     exit_code = 1

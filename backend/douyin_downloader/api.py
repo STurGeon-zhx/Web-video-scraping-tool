@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import __version__
 from .links import preview_links
 from .page_collector import douyin_search_mode, is_douyin_search_url
 from .page_sessions import PageSessionTracker
@@ -27,6 +28,7 @@ from .youtube_network import (
     test_youtube_connection,
     validate_youtube_network_settings,
 )
+from .updater import UpdateError
 
 
 class QueueController(Protocol):
@@ -58,6 +60,13 @@ class YoutubeAuthController(Protocol):
     def start(self, target_url: str | None = None) -> dict: ...
     def complete(self, timeout: float = 8.0) -> dict: ...
     def stop(self) -> None: ...
+
+
+class AppUpdateController(Protocol):
+    def status(self) -> dict: ...
+    def check(self) -> dict: ...
+    def prepare(self) -> dict: ...
+    def apply(self) -> dict: ...
 
 
 class PreviewRequest(BaseModel):
@@ -142,6 +151,8 @@ def create_app(
         [YoutubeNetworkSettings], Awaitable[tuple[bool, str]]
     ] = test_youtube_connection,
     youtube_auth_manager: YoutubeAuthController | None = None,
+    app_updater: AppUpdateController | None = None,
+    update_exit_callback: Callable[[], None] | None = None,
 ) -> FastAPI:
     page_disconnect_callback = shutdown_callback if shutdown_on_page_disconnect else lambda: None
     page_sessions = PageSessionTracker(page_disconnect_callback, grace_seconds=30.0)
@@ -163,7 +174,7 @@ def create_app(
                 youtube_auth_manager.stop()
             queue.stop()
 
-    app = FastAPI(title="视频批量下载工具", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="视频批量下载工具", version=__version__, lifespan=lifespan)
     app.state.page_sessions = page_sessions
     expander = batch_expander or BatchExpander()
     youtube_network = YoutubeNetworkSettingsProvider(database)
@@ -453,6 +464,46 @@ def create_app(
     async def shutdown(background_tasks: BackgroundTasks) -> dict:
         background_tasks.add_task(shutdown_callback)
         return {"message": "程序正在退出"}
+
+    @app.get("/api/app/version")
+    async def app_version() -> dict:
+        if app_updater is None:
+            return {
+                "current_version": __version__,
+                "packaged": False,
+                "can_self_update": False,
+                "prepared_version": None,
+            }
+        return app_updater.status()
+
+    @app.post("/api/app/update/check")
+    async def check_app_update() -> dict:
+        if app_updater is None:
+            raise HTTPException(status_code=503, detail="当前版本未启用更新检查")
+        try:
+            return await asyncio.to_thread(app_updater.check)
+        except UpdateError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @app.post("/api/app/update/prepare")
+    async def prepare_app_update() -> dict:
+        if app_updater is None:
+            raise HTTPException(status_code=503, detail="当前版本未启用自动更新")
+        try:
+            return await asyncio.to_thread(app_updater.prepare)
+        except UpdateError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/app/update/apply")
+    async def apply_app_update(background_tasks: BackgroundTasks) -> dict:
+        if app_updater is None:
+            raise HTTPException(status_code=503, detail="当前版本未启用自动更新")
+        try:
+            result = app_updater.apply()
+        except UpdateError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        background_tasks.add_task(update_exit_callback or shutdown_callback)
+        return result
 
     @app.get("/api/app/session")
     async def page_session() -> StreamingResponse:
