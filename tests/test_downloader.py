@@ -528,6 +528,62 @@ def test_refreshes_anonymous_cookies_once_when_required(tmp_path: Path) -> None:
     assert calls == 2
 
 
+def test_uses_browser_media_when_cookie_retry_still_fails(tmp_path: Path) -> None:
+    cookie_file = tmp_path / "anonymous-cookies.txt"
+    fallback_info: list[dict] = []
+    captured_options: list[dict] = []
+
+    class CookieProvider:
+        refresh_calls = 0
+        resolve_calls = 0
+
+        def refresh(self, _url: str) -> Path:
+            self.refresh_calls += 1
+            cookie_file.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+            return cookie_file
+
+        def resolve_media(self, url: str):
+            self.resolve_calls += 1
+            return SimpleNamespace(
+                url="https://v.example.com/video.mp4?token=test",
+                title="页面播放器标题",
+                http_headers={"Referer": url, "User-Agent": "Edge Test Agent"},
+            )
+
+    class FreshCookieFailure(FakeYoutubeDL):
+        def extract_info(self, url: str, download: bool) -> dict:
+            raise RuntimeError("Fresh cookies are needed")
+
+    class BrowserFallback(FakeYoutubeDL):
+        def process_ie_result(self, info: dict, download: bool) -> dict:
+            fallback_info.append(info)
+            return super().extract_info(info["webpage_url"], download)
+
+    def factory(options: dict):
+        captured_options.append(options)
+        if len(captured_options) <= 2:
+            return FreshCookieFailure(options)
+        return BrowserFallback(options, title="页面播放器标题")
+
+    provider = CookieProvider()
+    result = YtDlpDownloader(
+        ydl_factory=factory,
+        cookie_provider=provider,
+    ).download(make_task(tmp_path), lambda _event: None)
+
+    assert result.output_path.exists()
+    assert result.title == "页面播放器标题"
+    assert provider.refresh_calls == 1
+    assert provider.resolve_calls == 1
+    assert len(captured_options) == 3
+    assert captured_options[2]["cookiefile"] == str(cookie_file)
+    assert captured_options[2]["http_headers"] == {
+        "Referer": make_task(tmp_path).canonical_url,
+        "User-Agent": "Edge Test Agent",
+    }
+    assert fallback_info[0]["url"] == "https://v.example.com/video.mp4?token=test"
+
+
 def test_reuses_refreshed_cookie_for_later_tasks(tmp_path: Path) -> None:
     cookie_file = tmp_path / "anonymous-cookies.txt"
 

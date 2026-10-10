@@ -93,3 +93,89 @@ def test_refresh_opens_target_video_and_waits_for_target_cookies(tmp_path: Path)
     assert values["s_v_web_id"] == "ready"
     assert values["odin_tt"] == "settled"
     assert 5_000 in waits
+
+
+def test_resolve_media_uses_video_source_and_reuses_cached_result(tmp_path: Path) -> None:
+    launches: list[dict] = []
+    visited: list[str] = []
+
+    class Page:
+        def on(self, _event: str, _callback) -> None:
+            return None
+
+        def goto(self, url: str, **_kwargs) -> None:
+            visited.append(url)
+
+        def evaluate(self, _script: str):
+            return {
+                "sources": ["https://v.example.com/video.mp4?token=test"],
+                "title": "浏览器提取标题",
+                "userAgent": "Edge Test Agent",
+            }
+
+        def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    class Context:
+        pages = [Page()]
+
+        def cookies(self, _urls):
+            return [
+                {"name": "ttwid", "value": "fresh", "domain": ".douyin.com"}
+            ]
+
+        def close(self) -> None:
+            return None
+
+    class Chromium:
+        def launch_persistent_context(self, *_args, **kwargs):
+            launches.append(kwargs)
+            return Context()
+
+    class Playwright:
+        chromium = Chromium()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+    url = "https://www.douyin.com/video/1234567890123456789"
+    provider = AnonymousCookieProvider(tmp_path, playwright_factory=lambda: Playwright())
+
+    first = provider.resolve_media(url)
+    second = provider.resolve_media(url)
+
+    assert first == second
+    assert first.url == "https://v.example.com/video.mp4?token=test"
+    assert first.title == "浏览器提取标题"
+    assert first.http_headers == {
+        "Referer": url,
+        "User-Agent": "Edge Test Agent",
+    }
+    assert visited == [url]
+    assert launches == [{"channel": "msedge", "headless": True}]
+
+
+def test_page_media_ignores_non_video_cdn_page_effects() -> None:
+    class Page:
+        def evaluate(self, _script: str):
+            return {
+                "sources": [],
+                "title": "测试视频",
+                "userAgent": "Edge Test Agent",
+            }
+
+    target = "https://www.douyin.com/video/1234567890123456789"
+    media = AnonymousCookieProvider._page_media(
+        Page(),
+        target,
+        [
+            "https://v26-web.douyinvod.com/video.mp4?token=real",
+            "https://effect.example.com/page-decoration.mp4",
+        ],
+    )
+
+    assert media is not None
+    assert media.url == "https://v26-web.douyinvod.com/video.mp4?token=real"

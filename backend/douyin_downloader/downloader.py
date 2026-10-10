@@ -27,9 +27,23 @@ class YoutubeDLSession(Protocol):
 
     def extract_info(self, url: str, download: bool) -> dict[str, Any]: ...
 
+    def process_ie_result(
+        self,
+        info: dict[str, Any],
+        download: bool,
+    ) -> dict[str, Any]: ...
+
+
+class ResolvedBrowserMedia(Protocol):
+    url: str
+    title: str
+    http_headers: dict[str, str]
+
 
 class CookieProvider(Protocol):
     def refresh(self, url: str) -> Path: ...
+
+    def resolve_media(self, url: str) -> ResolvedBrowserMedia: ...
 
 
 class MediaProcessor(Protocol):
@@ -322,7 +336,23 @@ class YtDlpDownloader:
                         on_progress({"status": "resolving"})
                         retry_options = {**options, "cookiefile": str(cookie_file)}
                         with self._ydl_factory(retry_options) as retry_ydl:
-                            info = retry_ydl.extract_info(task.canonical_url, download=True)
+                            try:
+                                info = retry_ydl.extract_info(
+                                    task.canonical_url,
+                                    download=True,
+                                )
+                            except Exception as retry_exc:
+                                if (
+                                    task.platform != "douyin"
+                                    or classify_download_error(str(retry_exc))
+                                    != ErrorCode.FRESH_COOKIE
+                                ):
+                                    raise
+                                on_progress({"status": "resolving"})
+                                info = self._download_browser_media(
+                                    task,
+                                    retry_options,
+                                )
             source = self._downloaded_path(info)
             if source is None or not source.exists():
                 raise DownloadError(ErrorCode.UNKNOWN, "下载器未返回可用的输出文件")
@@ -433,6 +463,31 @@ class YtDlpDownloader:
             if self._cookie_file is None:
                 raise RuntimeError("Fresh cookies are needed")
             return self._cookie_file
+
+    def _download_browser_media(
+        self,
+        task: TaskRecord,
+        options: dict[str, Any],
+    ) -> dict[str, Any]:
+        resolver = getattr(self._cookie_provider, "resolve_media", None)
+        if not callable(resolver):
+            raise RuntimeError("Fresh cookies are needed")
+        media = resolver(task.canonical_url)
+        headers = {
+            **dict(options.get("http_headers") or {}),
+            **media.http_headers,
+        }
+        fallback_options = {**options, "http_headers": headers}
+        media_info = {
+            "id": task.video_id or str(task.id),
+            "title": media.title or task.title or "",
+            "webpage_url": task.canonical_url,
+            "url": media.url,
+            "ext": "mp4",
+            "http_headers": headers,
+        }
+        with self._ydl_factory(fallback_options) as fallback_ydl:
+            return fallback_ydl.process_ie_result(media_info, download=True)
 
     @staticmethod
     def _downloaded_path(info: dict[str, Any]) -> Path | None:
