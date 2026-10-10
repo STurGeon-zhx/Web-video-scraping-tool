@@ -84,7 +84,7 @@ def _default_client_factory() -> httpx.Client:
 def _default_process_launcher(command: list[str]) -> subprocess.Popen[bytes]:
     creation_flags = 0
     if os.name == "nt":
-        creation_flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS
+        creation_flags = subprocess.CREATE_NO_WINDOW
     return subprocess.Popen(
         command,
         close_fds=True,

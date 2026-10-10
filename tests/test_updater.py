@@ -10,7 +10,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from douyin_downloader.updater import AppUpdater, UpdateError, parse_release
+from douyin_downloader.updater import (
+    AppUpdater,
+    UpdateError,
+    _default_process_launcher,
+    parse_release,
+)
 
 
 def make_archive(executable_name: str, *, unsafe: bool = False) -> bytes:
@@ -166,6 +171,24 @@ def test_apply_launches_external_updater_with_exact_paths(tmp_path: Path) -> Non
     script = (tmp_path / "updates" / "apply-update.ps1").read_text(encoding="ascii")
     assert "Copy-Item -Destination $Destination" in script
     assert "Start-Process -FilePath" in script
+
+
+@pytest.mark.skipif(os.name != "nt", reason="桌面自动更新仅支持 Windows")
+def test_default_process_launcher_runs_hidden_powershell(tmp_path: Path) -> None:
+    marker = tmp_path / "update-launcher-ran.txt"
+    escaped_marker = str(marker).replace("'", "''")
+
+    process = _default_process_launcher(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            f"[IO.File]::WriteAllText('{escaped_marker}', 'ok')",
+        ]
+    )
+
+    assert process.wait(timeout=10) == 0
+    assert marker.read_text(encoding="utf-8") == "ok"
 
 
 def test_source_environment_cannot_prepare_self_update(tmp_path: Path) -> None:
