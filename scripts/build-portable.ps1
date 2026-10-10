@@ -41,8 +41,9 @@ try {
     $sourceRoot = $desktopExe.Directory.FullName
     $appName = $desktopExe.Directory.Name
     $packageRoot = Join-Path $portableRoot $appName
-    $zipPath = Join-Path $portableRoot "$appName-Portable-$date-Windows-x64.zip"
-    $checksumPath = Join-Path $portableRoot "$appName-Portable-$date-Windows-x64.sha256.txt"
+    $releaseName = "VideoBatchDownloader-Portable-$date-Windows-x64"
+    $zipPath = Join-Path $portableRoot "$releaseName.zip"
+    $checksumPath = Join-Path $portableRoot "$releaseName.sha256.txt"
 
     New-Item -ItemType Directory -Force -Path $portableRoot | Out-Null
     Assert-ProjectChild $packageRoot
